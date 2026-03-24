@@ -697,7 +697,7 @@ async def create_observations(
             message_ids=message_ids,
             message_created_at=message_created_at,
             source_ids=obs.source_ids
-            if obs.level in ("deductive", "inductive", "contradiction")
+            if obs.level in ("deductive", "inductive", "contradiction", "synthesis")
             else None,
             premises=obs.premises if obs.level == "deductive" else None,
             sources=obs.sources
@@ -716,7 +716,7 @@ async def create_observations(
             metadata=metadata,
             embedding=embedding,
             source_ids=obs.source_ids
-            if obs.level in ("deductive", "inductive", "contradiction")
+            if obs.level in ("deductive", "inductive", "contradiction", "synthesis")
             else None,
         )
         documents.append(doc)

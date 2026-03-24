@@ -1,0 +1,8 @@
+# Placeholder
+
+This directory would contain Honcho configuration files:
+- config.toml - Main Honcho configuration
+- logging.conf - Logging configuration
+
+These would be installed to /etc/honcho/ for system-wide installations
+or ~/.config/honcho/ for user installations.

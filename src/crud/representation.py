@@ -76,9 +76,24 @@ class RepresentationManager:
             obs.conclusion if isinstance(obs, DeductiveObservation) else obs.content
             for obs in all_observations
         ]
+        
+        # DEBUG: Log observation texts before embedding
+        import logging
+        logger = logging.getLogger(__name__)
+        for i, obs in enumerate(all_observations):
+            text = obs.conclusion if isinstance(obs, DeductiveObservation) else obs.content
+            logger.info(f"DEBUG OBS {i}: length={len(text)} total={sum(len(obs.conclusion if isinstance(obs, DeductiveObservation) else obs.content) for obs in all_observations)}")
+        
+        # DEBUG: Log what we're about to embed
+        logger.info(f"DEBUG EMBED INPUT: {len(observation_texts)} observations, total_chars={sum(len(t) for t in observation_texts)}, provider={embedding_client.provider}, model={embedding_client.model}")
+        for i, t in enumerate(observation_texts[:5]):  # Log first 5
+            logger.info(f"DEBUG EMBED TEXT {i}: len={len(t)} text={t[:200]!r}")
+        
         try:
             embeddings = await embedding_client.simple_batch_embed(observation_texts)
+            logger.info(f"DEBUG EMBED SUCCESS: {len(embeddings)} embeddings returned")
         except ValueError as e:
+            logger.error(f"DEBUG EMBED FAILED: {e}")
             raise exceptions.ValidationException(
                 f"Observation content exceeds maximum token limit of {settings.MAX_EMBEDDING_TOKENS}."
             ) from e

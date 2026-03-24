@@ -213,7 +213,11 @@ class LLMSettings(HonchoSettings):
     VLLM_API_KEY: str | None = None
     VLLM_BASE_URL: str | None = None
 
-    EMBEDDING_PROVIDER: Literal["openai", "gemini", "openrouter"] = "openai"
+    # Ollama settings for local embeddings and inference
+    OLLAMA_BASE_URL: str | None = "http://localhost:11434"
+    OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text:latest"
+
+    EMBEDDING_PROVIDER: Literal["openai", "gemini", "openrouter", "ollama"] = "openai"
 
     # General LLM settings
     DEFAULT_MAX_TOKENS: Annotated[int, Field(default=1000, gt=0, le=100_000)] = 2500
@@ -558,6 +562,8 @@ class DreamSettings(BackupLLMSettingsMixin, HonchoSettings):
     DEDUCTION_MODEL: str = "claude-haiku-4-5"
     # Induction Specialist: identifies patterns across observations
     INDUCTION_MODEL: str = "claude-haiku-4-5"
+    # Synthesis Specialist: creates architectural insights
+    SYNTHESIS_MODEL: str = "claude-haiku-4-5"
 
     # Surprisal-based sampling subsystem
     SURPRISAL: SurprisalSettings = Field(default_factory=SurprisalSettings)

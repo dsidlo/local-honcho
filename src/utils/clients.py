@@ -1927,7 +1927,12 @@ async def honcho_llm_call_inner(
                     test_rep = ""
                     if vllm_response.choices[0].message.content is not None:
                         test_rep = vllm_response.choices[0].message.content
-
+                    
+                    # DEBUG: Log what we received from vLLM
+                    logger.info(f"DEBUG: vLLM raw response length: {len(test_rep)}")
+                    logger.info(f"DEBUG: vLLM raw response preview: {test_rep[:500]!r}")
+                    logger.info(f"DEBUG: vLLM finish_reason: {finish_reason}")
+                    
                     final = validate_and_repair_json(test_rep)
 
                     # Schema-aware repair: ensure deductive observations have required fields

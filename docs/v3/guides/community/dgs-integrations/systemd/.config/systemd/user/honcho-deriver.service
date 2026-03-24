@@ -1,0 +1,20 @@
+[Unit]
+Description=Honcho Deriver (Background Worker)
+Documentation=https://docs.honcho.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/<user>/.local/lib/honcho
+ExecStart=/home/<uer>/.local/bin/uv run --no-dev python -m src.deriver
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/home/<user>/.env
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

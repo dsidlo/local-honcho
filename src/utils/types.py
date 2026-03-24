@@ -39,4 +39,4 @@ TaskType = Literal[
     "webhook", "summary", "representation", "dream", "deletion", "reconciler"
 ]
 VectorSyncState = Literal["synced", "pending", "failed"]
-DocumentLevel = Literal["explicit", "deductive", "inductive", "contradiction"]
+DocumentLevel = Literal["explicit", "deductive", "inductive", "contradiction", "synthesis"]

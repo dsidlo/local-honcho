@@ -26,10 +26,14 @@ from src import crud
 from src.config import settings
 from src.dependencies import tracked_db
 from src.dreamer.specialists import SPECIALISTS, SpecialistResult
+from src.dreamer.synthesis_specialist import SynthesisSpecialist, SYNTHESIS_SPECIALIST
 from src.dreamer.surprisal import SurprisalScore  # type: ignore
 from src.exceptions import SpecialistExecutionError, SurprisalError
 from src.schemas import DreamType
 from src.telemetry.events import DreamRunEvent, emit
+
+# Register synthesis specialist
+SPECIALISTS["synthesis"] = SYNTHESIS_SPECIALIST
 from src.telemetry.logging import (
     accumulate_metric,
     log_performance_metrics,
@@ -48,13 +52,14 @@ class DreamResult:
     run_id: str
     specialists_run: list[str]
 
-    # Specialist outcomes
-    deduction_success: bool
-    induction_success: bool
-
-    # Surprisal sampling
+    # Surprisal sampling (moved before optional fields)
     surprisal_enabled: bool
     surprisal_conclusion_count: int
+
+    # Specialist outcomes (all required, no defaults)
+    deduction_success: bool
+    induction_success: bool
+    synthesis_success: bool
 
     # Aggregate metrics
     total_iterations: int
@@ -214,6 +219,43 @@ async def run_dream(
         logger.error(f"[{run_id}] Induction specialist failed: {e}", exc_info=True)
         accumulate_metric(task_name, "induction_error", str(e), "blob")
 
+    # Phase 3: Run synthesis specialist (analyzes all previous phases for architectural insights)
+    synthesis_result = None
+    synthesis_success = False
+    synthesis_content = ""
+    if "synthesis" in SPECIALISTS:
+        logger.info(f"[{run_id}] Phase 3: Running synthesis specialist")
+        synthesis_specialist = SPECIALISTS["synthesis"]
+        # Build hints from previous phases
+        synthesis_hints = []
+        if deduction_result and deduction_result.content:
+            synthesis_hints.append(f"Deduction insights: {deduction_result.content[:500]}")
+        if induction_result and induction_result.content:
+            synthesis_hints.append(f"Induction patterns: {induction_result.content[:500]}")
+        if exploration_hints:
+            synthesis_hints.extend(exploration_hints[:3])
+        
+        try:
+            synthesis_result = await synthesis_specialist.run(
+                db=db,
+                workspace_name=workspace_name,
+                observer=observer,
+                observed=observed,
+                session_name=session_name,
+                hints=synthesis_hints if synthesis_hints else None,
+                configuration=configuration,
+                parent_run_id=run_id,
+            )
+            synthesis_content = synthesis_result.content[:200] if synthesis_result else "No synthesis produced"
+            logger.info(f"[{run_id}] Synthesis completed: {synthesis_content}...")
+            accumulate_metric(
+                task_name, "synthesis_result", synthesis_content, "blob"
+            )
+            synthesis_success = synthesis_result.success if synthesis_result else False
+        except SpecialistExecutionError as e:
+            logger.error(f"[{run_id}] Synthesis specialist failed: {e}", exc_info=True)
+            accumulate_metric(task_name, "synthesis_error", str(e), "blob")
+
     # Log final metrics
     duration_ms = (time.perf_counter() - start_time) * 1000
     accumulate_metric(task_name, "total_duration", duration_ms, "ms")
@@ -222,15 +264,26 @@ async def run_dream(
     log_performance_metrics("dream_orchestrator", run_id)
 
     # Aggregate metrics from specialist results
-    total_iterations = (deduction_result.iterations if deduction_result else 0) + (
-        induction_result.iterations if induction_result else 0
+    total_iterations = (
+        (deduction_result.iterations if deduction_result else 0) +
+        (induction_result.iterations if induction_result else 0) +
+        (synthesis_result.iterations if synthesis_result else 0)
     )
-    total_input_tokens = (deduction_result.input_tokens if deduction_result else 0) + (
-        induction_result.input_tokens if induction_result else 0
+    total_input_tokens = (
+        (deduction_result.input_tokens if deduction_result else 0) +
+        (induction_result.input_tokens if induction_result else 0) +
+        (synthesis_result.input_tokens if synthesis_result else 0)
     )
     total_output_tokens = (
-        deduction_result.output_tokens if deduction_result else 0
-    ) + (induction_result.output_tokens if induction_result else 0)
+        (deduction_result.output_tokens if deduction_result else 0) +
+        (induction_result.output_tokens if induction_result else 0) +
+        (synthesis_result.output_tokens if synthesis_result else 0)
+    )
+
+    # Emit DreamRunEvent with aggregated metrics
+    specialists_list = ["deduction", "induction"]
+    if synthesis_result is not None:
+        specialists_list.append("synthesis")
 
     # Emit DreamRunEvent with aggregated metrics
     emit(
@@ -240,9 +293,10 @@ async def run_dream(
             session_name=session_name,
             observer=observer,
             observed=observed,
-            specialists_run=["deduction", "induction"],
+            specialists_run=specialists_list,
             deduction_success=deduction_success,
             induction_success=induction_success,
+            synthesis_success=synthesis_success,
             surprisal_enabled=settings.DREAM.SURPRISAL.ENABLED,
             surprisal_conclusion_count=surprisal_observation_count,
             total_iterations=total_iterations,
@@ -254,9 +308,10 @@ async def run_dream(
 
     return DreamResult(
         run_id=run_id,
-        specialists_run=["deduction", "induction"],
+        specialists_run=specialists_list,
         deduction_success=deduction_success,
         induction_success=induction_success,
+        synthesis_success=synthesis_success,
         surprisal_enabled=settings.DREAM.SURPRISAL.ENABLED,
         surprisal_conclusion_count=surprisal_observation_count,
         total_iterations=total_iterations,

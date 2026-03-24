@@ -1,0 +1,5 @@
+# embed.modelfile
+FROM nomic-embed-text:latest
+PARAMETER temperature 0
+SYSTEM "You are an embedding model."
+
