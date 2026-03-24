@@ -1,5 +1,6 @@
 <!-- markdownlint-disable MD033 -->
 <div align="center">
+  <H1>LOCAL</H1>
   <a href="https://app.honcho.dev" target="_blank">
     <img src="assets/honcho.svg" alt="Honcho" width="400">
   </a>
@@ -12,6 +13,14 @@
 [![PyPI version](https://img.shields.io/pypi/v/honcho-ai.svg)](https://pypi.org/project/honcho-ai/)
 [![NPM version](https://img.shields.io/npm/v/@honcho-ai/sdk.svg)](https://npmjs.org/package/@honcho-ai/sdk)
 [![Discord](https://img.shields.io/discord/1016845111637839922?style=flat&logo=discord&logoColor=23ffffff&label=Plastic%20Labs&labelColor=235865F2)](https://discord.gg/plasticlabs)
+
+### Local-Honcho
+##### A fork of [plastic-labs/Honcho](https://github.com/plastic-labs/honcho)
+
+  - Run locally (systemd)
+  - Use local Postgresql
+  - Use Ollama models for the deriver and dreaming
+  - Extension for pi-mono to capture all user/agent/tool interactions
 
 Honcho is an open source memory library with a managed service for building stateful
 agents. Use it with any model, framework, or architecture. It enables agents to build
