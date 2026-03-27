@@ -1,6 +1,6 @@
 # Honcho Extension for pi-mono - README
 
-A pi-mono extension that captures the **complete ReAct cycle** for maximum Dreamer + Dialectic intelligence.
+A pi-mono extension that captures the **complete ReAct cycle** for maximum Dreamer + Dialectic intelligence, with **intelligent content chunking** for large messages and documents.
 
 ## Quick Reference
 
@@ -26,13 +26,15 @@ graph TB
     subgraph "Extension Internals"
         EVT[Event Handlers]
         QUEUE[Message Queue]
+        CHUNK[Intelligent Chunker<br/>Paragraph/Sentence Split]
+        BATCH[Batch Sizer<br/>Max 5 msgs/batch]
         FLUSH[Async Flusher]
     end
     
     subgraph "Honcho Services"
         API[Honcho API<br/>Port 8000]
         DERIVER[Deriver Worker]
-        DB[(PostgreSQL + pgvector)]
+        DB["PostgreSQL + pgvector"]
     end
     
     subgraph "Memory Layers"
@@ -45,7 +47,9 @@ graph TB
     PI --> EXT
     EXT --> EVT
     EVT --> QUEUE
-    QUEUE --> FLUSH
+    QUEUE --> CHUNK
+    CHUNK --> BATCH
+    BATCH --> FLUSH
     FLUSH -. Async .-> API
     API --> DB
     DB --> RAW
@@ -54,7 +58,7 @@ graph TB
     DERIVER --> DERIVED
 ```
 
-### Event-Driven Data Flow
+### Event-Driven Data Flow with Chunking
 
 ```mermaid
 sequenceDiagram
@@ -63,6 +67,8 @@ sequenceDiagram
     participant Pi as Pi Core
     participant Ext as Honcho Extension
     participant Queue as Message Queue
+    participant Chunker as Content Chunker
+    participant BATCH as Batch Processor
     participant API as Honcho API
     participant DB as PostgreSQL
 
@@ -76,21 +82,12 @@ sequenceDiagram
     
     Pi->>Pi: Agent generates response
     
-    Pi->>Ext: turn_start event
-    activate Ext
-    Ext->>Queue: Queue turn metadata
-    Ext-->>Pi: Return immediately
-    deactivate Ext
-    
-    Pi->>Ext: tool_call event
-    activate Ext
-    Ext->>Queue: Queue tool intent
-    Ext-->>Pi: Return immediately
-    deactivate Ext
+    Note over Ext: Large tool output detected<br/>e.g., honcho.ts (8KB+)
     
     Pi->>Ext: tool_result event  
     activate Ext
-    Ext->>Queue: Queue observation
+    Ext->>Queue: Queue large observation
+    Note over Queue: Content = 15,000 chars
     Ext-->>Pi: Return immediately
     deactivate Ext
     
@@ -98,16 +95,32 @@ sequenceDiagram
     activate Ext
     Ext->>Queue: Queue final response
     Ext->>Ext: setTimeout(flush, 0)
-    Ext-->>Pi: Return (spinner clears!)
+    Ext-->>Pi: Response visible!
     deactivate Ext
     
-    Note right of Pi: User sees response immediately
+    Note right of Queue: Background Processing Begins
     
-    par Background Flush
-        Queue->>API: HTTP POST /messages
-        API->>DB: INSERT messages
+    Queue->>Chunker: prepareMessageBatches()
+    activate Chunker
+    Chunker->>Chunker: splitContentIntoChunks()
+    Note over Chunker: Paragraph-first splitting<br/>Fallback to sentences<br/>MAX_CONTENT_LENGTH = 8000
+    Chunker-->>Queue: 2 chunks: 8K + 7K chars
+    deactivate Chunker
+    
+    Queue->>BATCH: Batch by MAX_MESSAGES_PER_BATCH = 5
+    
+    par Background Flush (Batched)
+        BATCH->>API: HTTP POST /messages (chunk 1)
+        API->>DB: INSERT with chunk metadata
+        Note over DB: Stores: chunk_index=1, total_chunks=2
+        
+        Note over BATCH: 50ms delay between batches
+        
+        BATCH->>API: HTTP POST /messages (chunk 2)
+        API->>DB: INSERT with chunk metadata
+        Note over DB: Stores: chunk_index=2, total_chunks=2
     and
-        Pi->>User: Streaming response
+        Pi->>User: Streaming response (already visible)
     end
 ```
 
@@ -134,6 +147,8 @@ classDiagram
         -currentModel: string
         +queueMessage(content, peer_id, metadata)
         +flushMessages()
+        +splitContentIntoChunks(content, maxSize)
+        +prepareMessageBatches(messages)
         +detectWorkspaceFromContext(ctx)
     }
     
@@ -141,6 +156,15 @@ classDiagram
         +content: string
         +peer_id: string
         +h_metadata: Map
+        +chunk_index: number (optional)
+        +total_chunks: number (optional)
+        +is_chunk: boolean (optional)
+    }
+    
+    class ChunkingConfig {
+        +MAX_MESSAGES_PER_BATCH: 5
+        +MAX_CONTENT_LENGTH: 8000
+        +MAX_DOC_SIZE: 100000
     }
     
     class HonchoAPI {
@@ -162,51 +186,110 @@ classDiagram
     ExtensionAPI --> HonchoExtension : uses
     HonchoExtension --> ExtensionContext : receives
     HonchoExtension --> PendingMessage : queues
+    HonchoExtension --> ChunkingConfig : configures
     HonchoExtension --> HonchoAPI : calls
     HonchoExtension --> EventHandlers : implements
 ```
 
-### Message Lifecycle
+### Chunking Algorithm Flow
+
+```mermaid
+flowchart TD
+    A[Content > MAX_CONTENT_LENGTH?] -->|Yes| B[Start Chunking]
+    A -->|No| Z[Return as single chunk]
+    
+    B --> C[Split by paragraphs<br/>/\\n\\n+/]
+    C --> D[For each paragraph]
+    
+    D --> E{Paragraph > maxSize?}
+    E -->|Yes| F[Flush current chunk]
+    F --> G["Split by sentences\nusing regex pattern"]
+    G --> H{Sentence > maxSize?}
+    H -->|Yes| I[Force split at char boundary]
+    H -->|No| J[Add to current chunk]
+    I --> K[Next sentence]
+    J --> K
+    K --> L{More sentences?}
+    L -->|Yes| G
+    L -->|No| M[Next paragraph]
+    
+    E -->|No| N{Fits in current chunk?}
+    N -->|Yes| O[Add paragraph + \\n\\n]
+    N -->|No| P[Flush current chunk]
+    P --> Q[Start new chunk]
+    O --> M
+    Q --> M
+    
+    M --> R{More paragraphs?}
+    R -->|Yes| D
+    R -->|No| S[Flush final chunk]
+    
+    S --> T[Return chunks array]
+    Z --> T
+    
+    T --> U[Create batch metadata]
+    U --> V["Add metadata fields"]
+```
+
+### Message Lifecycle with Chunking
 
 ```mermaid
 stateDiagram-v2
     [*] --> Created: User/Agent generates content
     
     Created --> Queued: queueMessage() called
+    Note right of Created
+        Original content preserved
+        in queue (may be 10K+ chars)
+    End note
     
-    Queued --> Scheduled: setTimeout(flush, 0)
+    Queued --> Processing: flushMessages() called
     
-    Scheduled --> Flushing: Next event loop tick
+    Processing --> Chunked: splitContentIntoChunks()
+    Note right of Chunked
+        Paragraph boundaries preferred
+        Sentence boundaries fallback
+        Force split if needed
+    End note
     
-    Flushing --> Sent: HTTP POST to /messages
+    Chunked --> Batched: prepareMessageBatches()
+    Note right of Batched
+        MAX_MESSAGES_PER_BATCH = 5
+        Each chunk becomes
+        separate message
+    End note
     
-    Sent --> Stored: PostgreSQL INSERT
+    Batched --> Sending: HTTP POST per batch
     
-    Stored --> Processing: Deriver picks up
+    Sending --> Stored: PostgreSQL INSERT
+    Note right of Stored
+        Each chunk stored with:
+        - chunk_index (1-based)
+        - total_chunks
+        - is_chunk: true
+        - original_length
+    End note
     
-    Processing --> Observed: Extract observations
-    
-    Observed --> Vectorized: Generate embeddings
+    Stored --> Processing2: Deriver picks up
+    Processing2 --> Vectorized: Generate embeddings
+    Note right of Vectorized
+        Smaller chunks = better
+        embedding quality due
+        to token limit alignment
+    End note
     
     Vectorized --> Indexed: HNSW index
-    
     Indexed --> Available: Query via Dialectic
     
-    Available --> [*]
-    
-    Note right of Created
-        In-memory only
+    Available --> Search: User queries
+    Search --> Reconstruct: Group by original
+    Note right of Reconstruct
+        Application layer can
+        reassemble chunks using
+        chunk_index/total_chunks
     End note
     
-    Note right of Queued
-        Extension queues
-        before async flush
-    End note
-    
-    Note right of Stored
-        Now durable in
-        PostgreSQL
-    End note
+    Reconstruct --> [*]
 ```
 
 ### Workspace Detection Flow
@@ -241,7 +324,7 @@ flowchart TD
     P --> Q[Ready to capture!]
 ```
 
-### Async Flush Pattern
+### Async Flush Pattern with Retry
 
 ```mermaid
 sequenceDiagram
@@ -249,23 +332,78 @@ sequenceDiagram
     participant Handler as Event Handler
     participant Stack as Call Stack
     participant Timer as setTimeout
+    participant Chunker as Content Chunker
     participant API as Honcho API
+    participant Queue as Failed Queue
 
     Note over Handler: User sees spinner
     
     Handler->>Stack: Queue messages
     Handler->>Timer: setTimeout(flush, 0)
-    Note over Timer: Schedules for next tick
     Handler->>Handler: Return immediately
     
     Note over Handler: Spinner clears!<br/>User sees response
     
     Timer->>Stack: Timeout fires
-    Stack->>API: HTTP POST begins
-    Note over API: Runs in background
-    API-->>Stack: Response received
+    Stack->>Chunker: prepareMessageBatches()
+    Chunker->>Chunker: splitContentIntoChunks()
     
-    Note over Handler: No UI impact
+    loop For each batch (max 5 messages)
+        Stack->>API: HTTP POST /messages
+        
+        alt Success
+            API-->>Stack: 201 Created
+        else Failure
+            API-->>Stack: Error/Timeout
+            Stack->>Queue: Re-queue non-chunked messages
+            Note over Queue: Chunks not re-queued<br/>to avoid infinite loops
+        end
+        
+        Note over Stack: 50ms delay between batches
+    end
+    
+    Note over Handler: No UI impact from flush
+```
+
+### Document Upload Chunking
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Tool as honcho_upload_document
+    participant Chunker as Content Chunker
+    participant API as Honcho API
+    participant DB as PostgreSQL
+
+    User->>Tool: Upload large file (150KB)
+    
+    Tool->>Tool: Read file content
+    Note over Tool: content.length = 150,000
+    
+    Tool->>Chunker: splitContentIntoChunks(MAX_DOC_SIZE=100K)
+    activate Chunker
+    Chunker->>Chunker: Paragraph-based splitting
+    Chunker-->>Tool: chunks[0], chunks[1] (~75K each)
+    deactivate Chunker
+    
+    Tool->>Tool: Create chunk metadata
+    Note over Tool: {is_chunked: true, total_chunks: 2}
+    
+    loop For each chunk
+        Tool->>API: POST /documents (chunk 1)
+        API->>DB: INSERT with metadata
+        DB-->>API: document_id
+        Note over API: Name: "file.ts (chunk 1/2)"
+        
+        Note over Tool: 50ms delay
+        
+        Tool->>API: POST /documents (chunk 2)
+        API->>DB: INSERT with metadata
+        DB-->>API: document_id
+        Note over API: Name: "file.ts (chunk 2/2)"
+    end
+    
+    Tool-->>User: "Uploaded in 2 chunks"
 ```
 
 ---
@@ -289,15 +427,28 @@ cd ~/projects/honcho && pi     # Workspace: "honcho"
 cd ~/my-api/src && pi         # Workspace: "my-api-src"
 ```
 
-### Full ReAct Trace Capture
+### Full ReAct Trace Capture with Chunking
 
 | Step | What's Captured | Metadata |
 |------|-----------------|----------|
 | User Prompt | Full text + images | `type: "prompt"`, `intended_model` |
 | Agent Thought | Reasoning/planning | `type: "thought"`, `step: "planning"` |
 | Tool Call | Tool name + args | `type: "tool_call"`, `tool: "bash"` |
-| Tool Output | stdout/stderr | `type: "observation"`, `status: "success"` |
+| Tool Output | stdout/stderr | `type: "observation"`, `will_be_chunked: true` |
 | Final Response | Complete output | `type: "final"`, `role: "assistant"` |
+
+### Intelligent Content Chunking
+
+**For Large Messages:**
+- **Threshold**: `MAX_CONTENT_LENGTH = 8000` chars (~250-400 tokens)
+- **Strategy**: Paragraph boundaries → Sentence boundaries → Character boundaries
+- **Batch Size**: `MAX_MESSAGES_PER_BATCH = 5` messages per HTTP request
+- **Metadata**: Each chunk includes `chunk_index`, `total_chunks`, `original_length`, `is_chunk`
+
+**For Document Uploads:**
+- **Threshold**: `MAX_DOC_SIZE = 100000` chars (~100KB)
+- **Strategy**: Same paragraph-based chunking as messages
+- **Storage**: Each chunk becomes separate document with linking metadata
 
 ---
 
@@ -308,7 +459,7 @@ Add to your `~/.env`:
 ```bash
 # Required
 HONCHO_BASE_URL=http://localhost:8000
-HONCHO_USER=<user>
+HONCHO_USER=dsidlo
 
 # Optional (defaults shown)  
 HONCHO_AGENT_ID=agent-pi-mono
@@ -321,14 +472,18 @@ HONCHO_WORKSPACE=default         # Used when mode=static
 ## Available Tools
 
 ### `honcho_store`
-Manually store a message in Honcho.
+Manually store a message in Honcho. Large content is automatically chunked.
 
 ```
 honcho_store
-  content: "Important information to remember"
+  content: "Important information to remember... (can be 10K+ chars)"
   peer_id: "user" (optional)
   metadata: { custom: "data" }
 ```
+
+**Response includes:**
+- `chunked: true/false` - Whether content was split
+- `chunks: N` - Number of chunks created
 
 ### `honcho_chat`
 Query Honcho's Dialectic for answers about stored memories.
@@ -348,7 +503,7 @@ honcho_insights
 ```
 
 ### `honcho_context`
-Retrieve recent conversation context.
+Retrieve recent conversation context (reconstructed from chunks).
 
 ```
 honcho_context
@@ -357,12 +512,47 @@ honcho_context
 ```
 
 ### `honcho_search`
-Search across all sessions.
+Search across all sessions (handles chunked content).
 
 ```
 honcho_search
   query: "jwt authentication"
   limit: 10
+```
+
+### `honcho_upload_document`
+Upload a file or document. Large files are intelligently chunked.
+
+```
+honcho_upload_document
+  file_path: "/path/to/large-file.ts"
+  name: "my-file" (optional)
+  metadata: { language: "typescript" }
+  level: "session" (user/session/workspace)
+```
+
+**Response includes:**
+- `is_chunked: true/false` - Whether file was split
+- `total_chunks: N` - Number of chunks created
+- `document_ids: ["id1", "id2", ...]` - IDs of all chunks
+
+### `honcho_list_documents`
+List all documents with chunk info.
+
+```
+honcho_list_documents
+  limit: 20
+  include_deleted: false
+```
+
+### `honcho_search_documents`
+Search documents using semantic/vector search.
+
+```
+honcho_search_documents
+  query: "error handling patterns"
+  limit: 5
+  level: "session" (optional filter)
 ```
 
 ---
@@ -371,9 +561,8 @@ honcho_search
 
 | Command | Description |
 |---------|-------------|
-| `/honcho-start` | Create new session (flushes current) |
-| `/honcho-status` | Show connection + pending messages |
-| `/honcho-flush` | Manually flush pending messages |
+| `/honcho-status` | Show connection + pending messages + chunk stats |
+| `/honcho-flush` | Manually flush pending messages (respects chunking) |
 
 ---
 
@@ -406,6 +595,14 @@ With the full trace, Honcho's Dreamer extracts:
 - **Decision rationale** - why you chose approach X over Y
 - **Model effectiveness** - which LLM performs best for you
 
+### Better Embeddings with Chunking
+
+Smaller chunks result in:
+- **Higher quality embeddings** - Model can focus on specific concepts
+- **Better semantic search** - More precise retrieval of relevant info
+- **Reduced token overflow** - No more "No embedding returned from Ollama" errors
+- **Improved context windows** - Each chunk fits comfortably in embedding model limits
+
 ---
 
 ## Troubleshooting
@@ -420,40 +617,59 @@ With the full trace, Honcho's Dreamer extracts:
 - Run `/honcho-flush` to force store
 - Verify workspace exists in Honcho
 
+### "No embedding returned from Ollama" errors
+- **Fixed by chunking**: Large messages are now automatically split
+- Check Honcho API logs: `journalctl --user -u honcho-api -e`
+- Verify Ollama is accessible at configured embed endpoint
+
 ### "Working" spinner stuck
-- Fixed: All flushes now use `setTimeout(..., 0)`
+- **Fixed**: All flushes use `setTimeout(..., 0)`
 - Extension returns immediately, flush runs in background
+
+### Chunks in search results
+- Chunks include metadata for reconstruction: `chunk_index`, `total_chunks`
+- Use chunk metadata to reassemble full content when needed
+- Search returns all chunks; filter/group by `original_doc_name`
 
 ---
 
 ## Implementation Notes
+
+### Chunking Configuration
+
+```typescript
+const MAX_MESSAGES_PER_BATCH = 5;      // Messages per HTTP request
+const MAX_CONTENT_LENGTH = 8000;         // ~250-400 tokens per message
+const MAX_DOC_SIZE = 100000;             // ~100KB for documents
+```
+
+### Chunking Algorithm
+
+1. **Paragraph Splitting**: First attempt to split at `\n\n+` (double newlines)
+2. **Sentence Fallback**: If paragraph > max, split at sentence boundaries (`[^.!?]+[.!?]+`)
+3. **Force Split**: If single sentence > max, split at character boundary
+4. **Batch Assembly**: Group processed messages into batches of max 5
 
 ### Async Design Pattern
 
 All event handlers use **fire-and-forget** pattern:
 
 ```typescript
-// Don't block UI
+// Queue first, return immediately
+await queueMessage(content, peer_id, metadata);
+
+// Let browser/runtime flush in background
 setTimeout(() => {
   flushMessages().catch(err => console.error(err));
 }, 0);
 ```
 
-This ensures pi's "Working" spinner clears immediately while HTTP requests run in the background.
-
-### Message Queue
-
-Messages are batched in memory until flush:
-- User messages queued first
-- Tool calls/observations queued as they happen  
-- Final response queued on `turn_end`
-- Single HTTP POST sends all messages atomically
-
 ### Error Handling
 
-- Failed flushes are caught and logged to console only
-- No UI interruption on network errors
-- Messages remain in queue for next flush attempt
+- **Failed flushes**: Logged to console only, no UI interruption
+- **Chunk retry policy**: Non-chunked messages re-queued; chunks dropped to avoid loops
+- **Batch isolation**: One batch failure doesn't affect others
+- **Queue clearing**: Queue cleared at flush start to prevent duplicates on partial failure
 
 ---
 
