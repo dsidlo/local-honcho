@@ -26,6 +26,7 @@
   - Use local Postgresql
   - Use Ollama models for the deriver and dreaming
   - Extension for pi-mono to capture all user/agent/tool interactions
+  - My changes documented here: [dgs-integrations](docs/v3/guides/community/dgs-integrations)
 
 Honcho is an open source memory library with a managed service for building stateful
 agents. Use it with any model, framework, or architecture. It enables agents to build
