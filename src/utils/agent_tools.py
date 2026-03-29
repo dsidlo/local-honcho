@@ -176,7 +176,7 @@ def _extract_pattern_snippet(
 TOOLS: dict[str, dict[str, Any]] = {
     "create_observations": {
         "name": "create_observations",
-        "description": "Create observations at any level: explicit (facts), deductive (logical necessities), inductive (patterns), or contradiction (conflicting statements). Use this to record facts, logical inferences, patterns, or note when the user has said contradictory things.",
+        "description": "Create observations at any level: explicit (facts), deductive (logical necessities), inductive (patterns), contradiction (conflicting statements), or synthesis (architectural insights). Use this to record facts, logical inferences, patterns, contradictions, or architectural synthesis observations.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -197,13 +197,14 @@ TOOLS: dict[str, dict[str, Any]] = {
                                     "deductive",
                                     "inductive",
                                     "contradiction",
+                                    "synthesis",
                                 ],
-                                "description": "Level: 'explicit' for direct facts, 'deductive' for logical necessities, 'inductive' for patterns, 'contradiction' for conflicting statements",
+                                "description": "Level: 'explicit' for direct facts, 'deductive' for logical necessities, 'inductive' for patterns, 'contradiction' for conflicting statements, 'synthesis' for architectural insights and consolidated learnings",
                             },
                             "source_ids": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "(For deductive/inductive/contradiction) Document IDs of source/premise observations - REQUIRED",
+                                "description": "(For deductive/inductive/contradiction/synthesis) Document IDs of source/premise observations - REQUIRED for deductive/inductive/contradiction, recommended for synthesis",
                             },
                             "premises": {
                                 "type": "array",

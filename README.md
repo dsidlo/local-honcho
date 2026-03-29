@@ -15,6 +15,11 @@
 [![Discord](https://img.shields.io/discord/1016845111637839922?style=flat&logo=discord&logoColor=23ffffff&label=Plastic%20Labs&labelColor=235865F2)](https://discord.gg/plasticlabs)
 
 ### Local-Honcho
+
+**Recent updates**
+- Added missing systhesis_specialist.py
+- Fixed bug with SythesisSpecialist not creating systhesis document records.
+
 ##### A fork of [plastic-labs/Honcho](https://github.com/plastic-labs/honcho)
 
   - Run locally (systemd)
