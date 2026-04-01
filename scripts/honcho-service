@@ -1,0 +1,152 @@
+#!/bin/bash
+# Honcho Service Manager
+# Convenience wrapper for managing Honcho systemd services
+
+set -e
+
+SERVICE_API="honcho-api"
+SERVICE_DERIVER="honcho-deriver"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Usage
+usage() {
+    cat << 'EOF'
+Honcho Service Manager
+
+Usage: honcho-service [COMMAND]
+
+Commands:
+    start       Start API and deriver services
+    stop        Stop API and deriver services
+    restart     Restart both services
+    status      Show detailed status of services
+    logs        Follow logs from both services
+    logs-api    Follow API service logs only
+    logs-deriver Follow deriver service logs only
+    enable      Enable auto-start on boot
+    disable     Disable auto-start
+    install     Run interactive installation
+
+Examples:
+    honcho-service start
+    honcho-service logs
+    honcho-service restart
+EOF
+}
+
+# Start services
+cmd_start() {
+    echo -e "${GREEN}Starting Honcho services...${NC}"
+    systemctl --user start $SERVICE_API $SERVICE_DERIVER
+    sleep 1
+    systemctl --user status $SERVICE_API $SERVICE_DERIVER --no-pager
+}
+
+# Stop services
+cmd_stop() {
+    echo -e "${YELLOW}Stopping Honcho services...${NC}"
+    systemctl --user stop $SERVICE_API $SERVICE_DERIVER
+}
+
+# Restart services
+cmd_restart() {
+    echo -e "${BLUE}Restarting Honcho services...${NC}"
+    systemctl --user restart $SERVICE_API $SERVICE_DERIVER
+    sleep 1
+    systemctl --user status $SERVICE_API $SERVICE_DERIVER --no-pager
+}
+
+# Show status
+cmd_status() {
+    echo -e "${BLUE}=== Honcho API Service ===${NC}"
+    systemctl --user status $SERVICE_API --no-pager || true
+    echo ""
+    echo -e "${BLUE}=== Honcho Deriver Service ===${NC}"
+    systemctl --user status $SERVICE_DERIVER --no-pager || true
+}
+
+# Follow logs
+cmd_logs() {
+    echo -e "${BLUE}Following logs (Ctrl+C to exit)...${NC}"
+    journalctl --user -u $SERVICE_API -u $SERVICE_DERIVER -f
+}
+
+cmd_logs_api() {
+    echo -e "${BLUE}Following API logs (Ctrl+C to exit)...${NC}"
+    journalctl --user -u $SERVICE_API -f
+}
+
+cmd_logs_deriver() {
+    echo -e "${BLUE}Following deriver logs (Ctrl+C to exit)...${NC}"
+    journalctl --user -u $SERVICE_DERIVER -f
+}
+
+# Enable services
+cmd_enable() {
+    echo -e "${GREEN}Enabling auto-start...${NC}"
+    systemctl --user enable $SERVICE_API $SERVICE_DERIVER
+    echo "Services will start automatically on login"
+}
+
+# Disable services
+cmd_disable() {
+    echo -e "${YELLOW}Disabling auto-start...${NC}"
+    systemctl --user disable $SERVICE_API $SERVICE_DERIVER
+    echo "Services will not start automatically"
+}
+
+# Run installer
+cmd_install() {
+    /home/<user>/workspace/honcho/scripts/install-systemd.sh
+}
+
+# Main
+COMMAND=${1:-status}
+
+case $COMMAND in
+    start)
+        cmd_start
+        ;;
+    stop)
+        cmd_stop
+        ;;
+    restart)
+        cmd_restart
+        ;;
+    status)
+        cmd_status
+        ;;
+    logs)
+        cmd_logs
+        ;;
+    logs-api)
+        cmd_logs_api
+        ;;
+    logs-deriver)
+        cmd_logs_deriver
+        ;;
+    enable)
+        cmd_enable
+        ;;
+    disable)
+        cmd_disable
+        ;;
+    install)
+        cmd_install
+        ;;
+    help|--help|-h)
+        usage
+        exit 0
+        ;;
+    *)
+        echo -e "${RED}Unknown command: $COMMAND${NC}"
+        usage
+        exit 1
+        ;;
+esac
