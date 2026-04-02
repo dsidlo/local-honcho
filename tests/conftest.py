@@ -815,3 +815,19 @@ def mock_crud_collection_operations(request: pytest.FixtureRequest):
         mock_get_or_create_collection,
     ):
         yield
+
+
+# =============================================================================
+# pytest-xdist Configuration for Sequential Tests
+# =============================================================================
+
+
+def pytest_collection_modifyitems(config, items):
+    """Add xdist_group marker to sequential tests.
+
+    This ensures all sequential tests run on the same worker process,
+    preventing event loop conflicts.
+    """
+    for item in items:
+        if item.get_closest_marker("sequential"):
+            item.add_marker(pytest.mark.xdist_group("sequential"))

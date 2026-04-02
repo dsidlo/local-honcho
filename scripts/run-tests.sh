@@ -21,6 +21,7 @@ fi
 USE_OLLAMA=""
 PARALLEL="auto"
 MARKERS=""
+RUN_SEQUENTIAL_WITH_FORK=true
 
 # Parse arguments
 PYTEST_ARGS=()
@@ -29,10 +30,15 @@ while [[ $# -gt 0 ]]; do
         --sequential-only)
             PARALLEL="0"
             MARKERS="-m sequential"
+            RUN_SEQUENTIAL_WITH_FORK=true
             shift
             ;;
         --no-parallel)
             PARALLEL="0"
+            shift
+            ;;
+        --no-fork)
+            RUN_SEQUENTIAL_WITH_FORK=false
             shift
             ;;
         --with-ollama)
@@ -47,8 +53,9 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [options] [pytest_args]"
             echo ""
             echo "Options:"
-            echo "  --sequential-only    Run only sequential tests (no parallelization)"
+            echo "  --sequential-only    Run only sequential tests (no parallelization, with fork)"
             echo "  --no-parallel        Run all tests sequentially"
+            echo "  --no-fork            Disable process forking for sequential tests"
             echo "  --with-ollama        Use real Ollama for embeddings (slower)"
             echo "  --no-embedding       Skip tests requiring embeddings"
             echo "  --help               Show this help message"
@@ -91,18 +98,62 @@ else
     echo "✓ Using mocked embeddings (fast, no Ollama required)"
 fi
 
-echo "Running tests..."
-echo "  Parallel workers: $PARALLEL"
-if [ -n "$MARKERS" ]; then
-    echo "  Markers: $MARKERS"
+# Run tests differently based on mode
+if [ "$PARALLEL" = "auto" ] && [ -z "$MARKERS" ]; then
+    # Default mode: run parallel tests first (excluding sequential), then sequential with fork
+    echo "Running parallel tests (excluding sequential)..."
+    echo ""
+    
+    # Run non-sequential tests in parallel
+    uv run pytest tests/ \
+        -n auto \
+        -m "not sequential" \
+        --tb=short \
+        -q \
+        "${PYTEST_ARGS[@]}" || { echo "Parallel tests failed"; exit 1; }
+    
+    echo ""
+    echo "Running sequential tests with process forking..."
+    echo ""
+    
+    # Run sequential tests with --forked for isolation
+    if [ "$RUN_SEQUENTIAL_WITH_FORK" = true ]; then
+        uv run pytest tests/ \
+            -m sequential \
+            --forked \
+            --tb=short \
+            -q \
+            "${PYTEST_ARGS[@]}" || { echo "Sequential tests failed"; exit 1; }
+    else
+        uv run pytest tests/ \
+            -m sequential \
+            --tb=short \
+            -q \
+            "${PYTEST_ARGS[@]}" || { echo "Sequential tests failed"; exit 1; }
+    fi
+else
+    # Use requested configuration
+    echo "Running tests..."
+    echo "  Parallel workers: $PARALLEL"
+    if [ -n "$MARKERS" ]; then
+        echo "  Markers: $MARKERS"
+    fi
+    if [ ${#PYTEST_ARGS[@]} -gt 0 ]; then
+        echo "  Pytest args: ${PYTEST_ARGS[*]}"
+    fi
+    echo ""
+    
+    # Build pytest command
+    CMD="uv run pytest tests/ -n $PARALLEL"
+    if [ -n "$MARKERS" ]; then
+        CMD="$CMD $MARKERS"
+    fi
+    if [ "$PARALLEL" = "0" ] && [ "$RUN_SEQUENTIAL_WITH_FORK" = true ]; then
+        CMD="$CMD --forked"
+    fi
+    
+    $CMD "${PYTEST_ARGS[@]}"
 fi
-if [ ${#PYTEST_ARGS[@]} -gt 0 ]; then
-    echo "  Pytest args: ${PYTEST_ARGS[*]}"
-fi
-echo ""
 
-# Run pytest
-uv run pytest tests/ \
-    -n "$PARALLEL" \
-    $MARKERS \
-    "${PYTEST_ARGS[@]}"
+echo ""
+echo "✓ All tests passed!"

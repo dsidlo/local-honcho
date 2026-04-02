@@ -1101,7 +1101,7 @@ class TestQueueProcessing:
 
         # Create messages with tokens BELOW the threshold
         limit = settings.DERIVER.REPRESENTATION_BATCH_MAX_TOKENS
-        token_counts = [100, 100, 100]  # Total 300, way below 4096
+        token_counts = [100, 100, 100]  # Total 300, way below threshold
 
         messages: list[models.Message] = []
         for i, token_count in enumerate(token_counts):
@@ -1147,8 +1147,11 @@ class TestQueueProcessing:
 
         qm = QueueManager()
 
-        # Try to claim work units - should NOT return the representation work unit
-        claimed = await qm.get_and_claim_work_units()
+        # Test requires FLUSH_ENABLED=False to verify token threshold logic
+        # When FLUSH_ENABLED=True, the threshold filter is bypassed entirely
+        with patch.object(settings.DERIVER, "FLUSH_ENABLED", False):
+            # Try to claim work units - should NOT return the representation work unit
+            claimed = await qm.get_and_claim_work_units()
 
         # The representation work unit should NOT be claimed (tokens below threshold)
         rep_work_unit_key = queue_items[0].work_unit_key
@@ -1195,7 +1198,8 @@ class TestQueueProcessing:
         await db_session.commit()
 
         # Now the work unit should be claimable (tokens exceed threshold)
-        claimed2 = await qm.get_and_claim_work_units()
+        with patch.object(settings.DERIVER, "FLUSH_ENABLED", False):
+            claimed2 = await qm.get_and_claim_work_units()
         assert rep_work_unit_key in claimed2
 
     @pytest.mark.asyncio

@@ -58,6 +58,7 @@ dev = [
     "scipy>=1.15.3",
     "boto3>=1.42.5",
     "pytest-xdist>=3.8.0",
+    "pytest-forked>=1.6.0",
 ]
 
 [tool.uv.workspace]
@@ -92,7 +93,9 @@ extend-immutable-calls = ["fastapi.Depends"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
-addopts = "--strict-markers -n auto --ignore=tests/alembic"
+# Note: -n auto and --dist=loadgroup are handled by scripts/run-tests.sh
+# to allow separate parallel and sequential test runs with --forked
+addopts = "--strict-markers --ignore=tests/alembic"
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
