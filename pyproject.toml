@@ -95,6 +95,11 @@ asyncio_default_fixture_loop_scope = "session"
 addopts = "--strict-markers -n auto --ignore=tests/alembic"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "sequential: marks tests that must run sequentially (not in parallel)",
+    "integration: marks tests that require external services",
+    "embedding: marks tests that require embedding service",
+]
 filterwarnings = [
     "ignore:Call to deprecated close\\. \\(Use aclose\\(\\) instead\\).*:DeprecationWarning",
     "ignore:websockets\\.legacy is deprecated; see .* for upgrade instructions:DeprecationWarning",

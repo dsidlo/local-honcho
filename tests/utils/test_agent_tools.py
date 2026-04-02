@@ -373,6 +373,145 @@ class TestCreateObservations:
         assert len(created_documents) == 1
         assert created_documents[0].content == "Embeds fine"
 
+    async def test_create_synthesis_level_observation(
+        self,
+        db_session: AsyncSession,
+        tool_test_data: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Verify synthesis level observations can be created with source_ids."""
+        workspace, peer1, peer2, session, _, _ = tool_test_data
+
+        async def mock_batch_embed(texts: list[str]) -> list[list[float]]:
+            return [[0.1] * 1536 for _ in texts]
+
+        created_documents: list[Any] = []
+
+        async def fake_create_documents(
+            _db: AsyncSession,
+            documents: list[Any],
+            workspace_name: str,
+            *,
+            observer: str,
+            observed: str,
+            deduplicate: bool = False,
+        ) -> int:
+            _ = (workspace_name, observer, observed, deduplicate)
+            created_documents.extend(documents)
+            return len(documents)
+
+        monkeypatch.setattr(
+            "src.utils.agent_tools.embedding_client.simple_batch_embed",
+            mock_batch_embed,
+        )
+        monkeypatch.setattr(
+            "src.utils.agent_tools.crud.create_documents", fake_create_documents
+        )
+
+        result = await create_observations(
+            db_session,
+            observations=[
+                schemas.ObservationInput(
+                    content="State management should be consolidated",
+                    level="synthesis",
+                    source_ids=["doc1", "doc2", "doc3"],
+                ),
+            ],
+            observer=peer1.name,
+            observed=peer2.name,
+            session_name=session.name,
+            workspace_name=workspace.name,
+            message_ids=[],
+            message_created_at=str(datetime.now(timezone.utc)),
+        )
+
+        assert isinstance(result, ObservationsCreatedResult)
+        assert result.created_count == 1
+        assert len(result.failed) == 0
+        assert len(created_documents) == 1
+        
+        # Verify synthesis level is preserved
+        doc = created_documents[0]
+        assert doc.level == "synthesis"
+        assert doc.source_ids == ["doc1", "doc2", "doc3"]
+
+    async def test_create_mixed_level_observations_including_synthesis(
+        self,
+        db_session: AsyncSession,
+        tool_test_data: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Verify multiple observation levels can be created in one batch."""
+        workspace, peer1, peer2, session, _, _ = tool_test_data
+
+        async def mock_batch_embed(texts: list[str]) -> list[list[float]]:
+            return [[0.1] * 1536 for _ in texts]
+
+        created_documents: list[Any] = []
+
+        async def fake_create_documents(
+            _db: AsyncSession,
+            documents: list[Any],
+            workspace_name: str,
+            *,
+            observer: str,
+            observed: str,
+            deduplicate: bool = False,
+        ) -> int:
+            _ = (workspace_name, observer, observed, deduplicate)
+            created_documents.extend(documents)
+            return len(documents)
+
+        monkeypatch.setattr(
+            "src.utils.agent_tools.embedding_client.simple_batch_embed",
+            mock_batch_embed,
+        )
+        monkeypatch.setattr(
+            "src.utils.agent_tools.crud.create_documents", fake_create_documents
+        )
+
+        observations = [
+            schemas.ObservationInput(content="User likes coffee", level="explicit"),
+            schemas.ObservationInput(
+                content="User prefers morning meetings",
+                level="deductive",
+                source_ids=["doc1"],
+            ),
+            schemas.ObservationInput(
+                content="Pattern: User mentions productivity tools frequently",
+                level="inductive",
+                source_ids=["doc1", "doc2"],
+            ),
+            schemas.ObservationInput(
+                content="Architecture: State should be centralized",
+                level="synthesis",
+                source_ids=["doc1", "doc2", "doc3"],
+            ),
+        ]
+
+        result = await create_observations(
+            db_session,
+            observations=observations,
+            observer=peer1.name,
+            observed=peer2.name,
+            session_name=session.name,
+            workspace_name=workspace.name,
+            message_ids=[],
+            message_created_at=str(datetime.now(timezone.utc)),
+        )
+
+        assert isinstance(result, ObservationsCreatedResult)
+        assert result.created_count == 4
+        assert len(result.failed) == 0
+        assert len(created_documents) == 4
+        
+        # Verify all levels are preserved
+        levels = [doc.level for doc in created_documents]
+        assert "explicit" in levels
+        assert "deductive" in levels
+        assert "inductive" in levels
+        assert "synthesis" in levels
+
 
 @pytest.mark.asyncio
 class TestDeleteObservations:

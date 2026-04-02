@@ -1,6 +1,12 @@
-"""Tests for observation SDK methods."""
+"""Tests for observation SDK methods.
+
+Note: These tests are marked as sequential because they interact with vector
+storage and embedding services which can have race conditions when running in parallel.
+"""
 
 import pytest
+
+pytestmark = pytest.mark.sequential
 
 from sdks.python.src.honcho.client import Honcho
 from sdks.python.src.honcho.conclusions import (

@@ -61,9 +61,10 @@ class HonchoHarness:
         self.env_file_backup: Path | None = None
         self.output_threads: list[threading.Thread] = []
         # DB credentials — populated from docker-compose.yml.example in create_temp_docker_compose
-        self.db_user: str = "postgres"
-        self.db_password: str = "postgres"
-        self.db_name: str = "postgres"
+        # No hardcoded defaults - must be provided via docker-compose environment
+        self.db_user: str | None = None
+        self.db_password: str | None = None
+        self.db_name: str | None = None
 
     def _extract_db_credentials(self, compose_data: dict[str, Any]) -> None:
         """Extract POSTGRES_USER/PASSWORD/DB from the database service environment."""
@@ -76,9 +77,17 @@ class HonchoHarness:
                 # Handle "- KEY=VALUE" format
                 key, _, value = entry.partition("=")
                 env_map[key.strip()] = value.strip()
-        self.db_user = env_map.get("POSTGRES_USER", self.db_user)
-        self.db_password = env_map.get("POSTGRES_PASSWORD", self.db_password)
-        self.db_name = env_map.get("POSTGRES_DB", self.db_name)
+        self.db_user = env_map.get("POSTGRES_USER")
+        self.db_password = env_map.get("POSTGRES_PASSWORD")
+        self.db_name = env_map.get("POSTGRES_DB")
+        
+        if not self.db_user or not self.db_password or not self.db_name:
+            available = ", ".join(env_map.keys())
+            raise ValueError(
+                f"Missing required database credentials in docker-compose.yml. "
+                f"Need POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB. "
+                f"Available env vars: {available}"
+            )
 
     @property
     def db_connection_uri(self) -> str:
