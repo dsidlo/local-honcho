@@ -155,10 +155,19 @@ class BackupLLMSettingsMixin:
 class DBSettings(HonchoSettings):
     model_config = SettingsConfigDict(env_prefix="DB_", extra="ignore")  # pyright: ignore
 
-    CONNECTION_URI: str = (
-        "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
-    )
+    CONNECTION_URI: str | None = None  # Must be set via environment (no hardcoded default)
     SCHEMA: str = "public"
+
+    @model_validator(mode="after")  # type: ignore
+    def _require_connection_uri(self) -> "DBSettings":
+        """Require CONNECTION_URI to be set - no hardcoded defaults."""
+        if not self.CONNECTION_URI:
+            raise ValueError(
+                "DB.CONNECTION_URI must be set. "
+                "Set the HONCHO_DATABASE__CONNECTION_URI or DB_CONNECTION_URI "
+                "environment variable with your database connection string."
+            )
+        return self
     POOL_CLASS: str = "default"
     POOL_PRE_PING: bool = True
     POOL_SIZE: Annotated[int, Field(default=10, gt=0, le=1000)] = 10

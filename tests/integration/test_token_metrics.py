@@ -292,8 +292,8 @@ class TestDeriverIngestionMetrics:
 
         mock_response = create_mock_deriver_response()
 
-        # Get expected prompt tokens
-        expected_prompt_tokens = estimate_minimal_deriver_prompt_tokens()
+        # Get expected prompt tokens (with default max_embedding_tokens)
+        expected_prompt_tokens = estimate_minimal_deriver_prompt_tokens(max_embedding_tokens=2048)
 
         labels = {
             "namespace": "test",

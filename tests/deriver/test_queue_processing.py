@@ -14,8 +14,13 @@ from src.utils.work_unit import construct_work_unit_key
 
 
 @pytest.mark.asyncio
+@pytest.mark.sequential
 class TestQueueProcessing:
-    """Test suite for queue processing functionality"""
+    """Test suite for queue processing functionality
+
+    Note: These tests are marked as sequential because they interact with shared
+    queue state and can have race conditions when running in parallel.
+    """
 
     async def test_get_and_claim_work_units(
         self,

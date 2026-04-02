@@ -59,12 +59,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logging.getLogger("sqlalchemy.engine.Engine").disabled = True
 
-# Test database URL
-# TODO use environment variable
-DB_URI = (
-    settings.DB.CONNECTION_URI
-    or "postgresql+psycopg://postgres:postgres@localhost:5432/postgres"
-)
+# Test database URL from configuration (no hardcoded defaults)
+DB_URI = settings.DB.CONNECTION_URI
+if not DB_URI:
+    raise ValueError(
+        "DB.CONNECTION_URI must be set in configuration or environment. "
+        "Set HONCHO_DATABASE__CONNECTION_URI environment variable."
+    )
 CONNECTION_URI = make_url(DB_URI)
 
 _RUNTIME_MOCK_TEST_BLOCKLIST_PREFIXES = (
@@ -76,9 +77,21 @@ _RUNTIME_MOCK_TEST_BLOCKLIST_PREFIXES = (
 
 
 def _requires_runtime_mocks(nodeid: str) -> bool:
-    return not any(
-        nodeid.startswith(prefix) for prefix in _RUNTIME_MOCK_TEST_BLOCKLIST_PREFIXES
-    )
+    """Check if a test requires runtime mocks.
+
+    Tests in the blocklist don't require mocks (they handle their own setup).
+    To use real Ollama embeddings for tests, set HONCHO_TEST_USE_OLLAMA=1
+    """
+    # Skip mocks for blocklisted test paths
+    if any(nodeid.startswith(prefix) for prefix in _RUNTIME_MOCK_TEST_BLOCKLIST_PREFIXES):
+        return False
+
+    # Allow overriding with environment variable to use real Ollama
+    import os
+    if os.environ.get("HONCHO_TEST_USE_OLLAMA"):
+        return False
+
+    return True
 
 
 def _get_nodeid(request: pytest.FixtureRequest) -> str:
@@ -129,7 +142,7 @@ async def setup_test_database(db_url: URL):
     Returns:
         engine: SQLAlchemy engine
     """
-    engine = create_async_engine(str(db_url), echo=False)
+    engine = create_async_engine(db_url, echo=False)
     async with engine.connect() as conn:
         try:
             logger.info("Attempting to create pgvector extension...")

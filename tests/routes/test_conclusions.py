@@ -8,7 +8,12 @@ from src.models import Peer, Workspace
 
 
 class TestConclusionRoutes:
-    """Test suite for conclusion API endpoints"""
+    """Test suite for conclusion API endpoints
+
+    Note: These tests are marked as sequential because they interact with vector
+    storage which can have race conditions when running in parallel.
+    """
+    pytestmark = pytest.mark.sequential
 
     async def _create_collection(
         self,
