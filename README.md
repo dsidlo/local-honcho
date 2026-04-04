@@ -19,6 +19,7 @@
 **Recent updates**
 - Added missing systhesis_specialist.py
 - Fixed bug with SythesisSpecialist not creating systhesis document records.
+- Hybrid Vector search, Full Text Search, Trigram Fuzzy Search with Corss-Encoder Reranking
 
 ##### A fork of [plastic-labs/Honcho](https://github.com/plastic-labs/honcho)
 

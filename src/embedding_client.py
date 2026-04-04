@@ -9,7 +9,7 @@ import asyncio
 import logging
 import threading
 from collections import defaultdict
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import httpx
 import tiktoken
@@ -411,6 +411,17 @@ _embedding_client_instance: _EmbeddingClient | None = None
 _client_lock = threading.Lock()
 
 
+class _EmbeddingClientProxy:
+    """Proxy that always delegates to the current singleton instance.
+    
+    This ensures that when close_embedding_client() resets the singleton,
+    code that imported embedding_client gets the new instance automatically.
+    """
+    
+    def __getattr__(self, name: str) -> Any:
+        return getattr(get_embedding_client(), name)
+
+
 def get_embedding_client() -> _EmbeddingClient:
     """Get or create the singleton embedding client instance."""
     global _embedding_client_instance
@@ -420,8 +431,8 @@ def get_embedding_client() -> _EmbeddingClient:
         return _embedding_client_instance
 
 
-# Module-level singleton instance for direct import
-embedding_client = get_embedding_client()
+# Module-level singleton instance for direct import (uses proxy)
+embedding_client: _EmbeddingClient = _EmbeddingClientProxy()  # type: ignore[assignment]
 
 # Backwards compatibility aliases
 embedding = get_embedding_client
@@ -433,5 +444,9 @@ async def close_embedding_client() -> None:
     global _embedding_client_instance
     with _client_lock:
         if _embedding_client_instance is not None:
-            await _embedding_client_instance.close()
+            try:
+                await _embedding_client_instance.close()
+            except RuntimeError:
+                # Event loop may be closed, ignore
+                pass
             _embedding_client_instance = None

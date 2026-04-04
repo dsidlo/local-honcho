@@ -4,12 +4,13 @@ import datetime
 import logging
 import time
 from contextlib import suppress
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src import crud, exceptions, models, schemas
+from src.crud.document import query_documents_hybrid
 from src.config import settings
 from src.dependencies import tracked_db
 from src.dreamer.dream_scheduler import check_and_schedule_dream
@@ -205,6 +206,8 @@ class RepresentationManager:
         semantic_search_max_distance: float | None = None,
         include_most_derived: bool = False,
         max_observations: int = settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
+        use_hybrid: bool = False,
+        hybrid_method: Literal["rrf", "weighted", "cascade"] = "rrf",
     ) -> Representation:
         """
         Get working representation with flexible query options.
@@ -219,6 +222,8 @@ class RepresentationManager:
             semantic_search_max_distance: Maximum distance for semantic search
             include_most_derived: Include most derived observations
             max_observations: Maximum total observations to return
+            use_hybrid: Enable hybrid search (vector + FTS + trigram)
+            hybrid_method: Fusion method for hybrid search
 
         Returns:
             Representation combining various query strategies
@@ -238,6 +243,8 @@ class RepresentationManager:
                 semantic_search_max_distance=semantic_search_max_distance,
                 include_most_derived=include_most_derived,
                 max_observations=max_observations,
+                use_hybrid=use_hybrid,
+                hybrid_method=hybrid_method,
             )
 
         async with tracked_db(
@@ -252,6 +259,8 @@ class RepresentationManager:
                 semantic_search_max_distance=semantic_search_max_distance,
                 include_most_derived=include_most_derived,
                 max_observations=max_observations,
+                use_hybrid=use_hybrid,
+                hybrid_method=hybrid_method,
             )
 
     # Private helper methods
@@ -267,8 +276,12 @@ class RepresentationManager:
         semantic_search_max_distance: float | None = None,
         include_most_derived: bool = False,
         max_observations: int = settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
+        use_hybrid: bool = False,
+        hybrid_method: Literal["rrf", "weighted", "cascade"] = "rrf",
     ) -> Representation:
         """Internal implementation of get_working_representation."""
+
+        # ... existing allocation logic ...
         total = max_observations
 
         # Calculate how many observations to get from each source
@@ -309,6 +322,9 @@ class RepresentationManager:
                 top_k=semantic_observations,
                 max_distance=semantic_search_max_distance,
                 embedding=embedding,
+                use_hybrid=use_hybrid,
+                hybrid_method=hybrid_method,
+                session_name=session_name,
             )
             representation.merge_representation(
                 Representation.from_documents(semantic_docs)
@@ -340,10 +356,48 @@ class RepresentationManager:
         max_distance: float | None = None,
         level: str | None = None,
         embedding: list[float] | None = None,
+        use_hybrid: bool = False,
+        hybrid_method: Literal["rrf", "weighted", "cascade"] = "rrf",
+        session_name: str | None = None,
     ) -> list[models.Document]:
-        """Query documents by semantic similarity."""
+        """Query documents by semantic similarity with optional hybrid search.
+
+        Args:
+            db: Database session
+            query: Search query text
+            top_k: Number of results to return
+            max_distance: Maximum cosine distance for results
+            level: Filter by document level (explicit/deductive)
+            embedding: Optional pre-computed embedding
+            use_hybrid: Whether to use hybrid search (vector + FTS + trigram)
+            hybrid_method: Fusion method for hybrid search (rrf, weighted, cascade)
+            session_name: Optional session filter for hybrid search
+
+        Returns:
+            List of matching documents
+        """
         try:
-            if level:
+            if use_hybrid:
+                # Use hybrid search combining vector, FTS, and trigram
+                filters = self._build_filter_conditions(level)
+                if session_name:
+                    filters["session_name"] = session_name
+
+                documents = await query_documents_hybrid(
+                    db,
+                    workspace_name=self.workspace_name,
+                    query=query,
+                    observer=self.observer,
+                    observed=self.observed,
+                    embedding=embedding,
+                    filters=filters if filters else None,
+                    max_distance=max_distance,
+                    top_k=top_k,
+                    method=hybrid_method,
+                )
+                db.expunge_all()
+                return list(documents)
+            elif level:
                 return await self._query_documents_for_level(
                     db,
                     query,
@@ -353,7 +407,7 @@ class RepresentationManager:
                     embedding=embedding,
                 )
             else:
-                documents = await crud.query_documents(
+                documents = await crud.query_documents_hybrid(
                     db,
                     workspace_name=self.workspace_name,
                     observer=self.observer,
@@ -362,6 +416,7 @@ class RepresentationManager:
                     max_distance=max_distance,
                     top_k=top_k,
                     embedding=embedding,
+                    method="rrf",
                 )
                 db.expunge_all()
                 return list(documents)
@@ -438,7 +493,7 @@ class RepresentationManager:
         embedding: list[float] | None = None,
     ) -> list[models.Document]:
         """Query documents for a specific level."""
-        documents = await crud.query_documents(
+        documents = await crud.query_documents_hybrid(
             db,
             workspace_name=self.workspace_name,
             observer=self.observer,
@@ -448,6 +503,7 @@ class RepresentationManager:
             top_k=count,
             filters=self._build_filter_conditions(level),
             embedding=embedding,
+            method="rrf",
         )
 
         # Sort by creation time
@@ -489,6 +545,8 @@ async def get_working_representation(
     semantic_search_max_distance: float | None = None,
     include_most_derived: bool = False,
     max_observations: int = settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
+    use_hybrid: bool = False,
+    hybrid_method: Literal["rrf", "weighted", "cascade"] = "rrf",
 ) -> Representation:
     """
     Get raw working representation data from the relevant document collection.
@@ -500,6 +558,8 @@ async def get_working_representation(
         db: Optional database session. If provided, uses it directly;
             otherwise creates a new session via tracked_db.
         embedding: Pre-computed embedding for the semantic query.
+        use_hybrid: Enable hybrid search (vector + FTS + trigram)
+        hybrid_method: Fusion method for hybrid search (rrf, weighted, cascade)
     """
     manager = RepresentationManager(
         workspace_name=workspace_name,
@@ -515,4 +575,6 @@ async def get_working_representation(
         semantic_search_max_distance=semantic_search_max_distance,
         include_most_derived=include_most_derived,
         max_observations=max_observations,
+        use_hybrid=use_hybrid,
+        hybrid_method=hybrid_method,
     )

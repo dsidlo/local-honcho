@@ -14,6 +14,7 @@ from .document import (
     get_documents_by_ids,
     get_documents_with_filters,
     query_documents,
+    query_documents_hybrid,
     query_documents_most_derived,
     query_documents_recent,
 )
@@ -87,6 +88,7 @@ __all__ = [
     "get_documents_by_ids",
     "get_documents_with_filters",
     "query_documents",
+    "query_documents_hybrid",
     "query_documents_most_derived",
     "query_documents_recent",
     "delete_document",

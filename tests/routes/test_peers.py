@@ -313,15 +313,13 @@ def test_chat(
     sample_data: tuple[Workspace, Peer],
 ):
     test_workspace, test_peer = sample_data
-    target_peer = str(generate_nanoid())
 
-    # Test chat endpoint
+    # Test chat endpoint without target (defaults to self)
     response = client.post(
         f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/chat",
         json={
             "query": "Hello, how are you?",
             "stream": False,
-            "target": target_peer,
         },
     )
     assert response.status_code == 200

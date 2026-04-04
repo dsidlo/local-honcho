@@ -1,5 +1,6 @@
 import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 from fastapi import Depends
 from sqlalchemy import text
@@ -7,6 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.db import SessionLocal, request_context
+
+# Context variable to store test database session
+# When set, tracked_db will use this instead of creating a new SessionLocal
+_test_db_session: ContextVar[AsyncSession | None] = ContextVar("_test_db_session", default=None)
 
 
 async def get_db():
@@ -33,8 +38,19 @@ async def get_db():
 
 @asynccontextmanager
 async def tracked_db(operation_name: str | None = None):
-    """Context manager for tracked database sessions"""
-    # Get request ID if available, or create operation-specific one
+    """Context manager for tracked database sessions.
+    
+    In tests, this will use the test database session if one is set via
+    set_test_db_session(). Otherwise, it creates a new SessionLocal connection.
+    """
+    # Check if we're in a test context with a test session
+    test_session = _test_db_session.get()
+    if test_session is not None:
+        # Use the test session directly - no need to close it
+        yield test_session
+        return
+    
+    # Normal production flow: create a new session
     context = request_context.get()
     token = None
 
@@ -62,6 +78,15 @@ async def tracked_db(operation_name: str | None = None):
         await db.close()
         if token:  # Only reset if we set it
             request_context.reset(token)
+
+
+def set_test_db_session(session: AsyncSession | None) -> object:
+    """Set the test database session for tracked_db to use.
+    
+    This should only be used in test fixtures to inject the test session.
+    Returns a token that must be used to reset the context.
+    """
+    return _test_db_session.set(session)
 
 
 db: AsyncSession = Depends(get_db)

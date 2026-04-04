@@ -4,7 +4,7 @@ from typing import Annotated, Any, ClassVar, Literal, Protocol
 
 import tomllib
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, AliasChoices
 from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
@@ -16,9 +16,19 @@ from pydantic_settings import (
 
 from src.utils.types import SupportedProviders
 
-# Load .env file for local development.
-# Make sure this is called before AppSettings is instantiated if you rely on .env for AppSettings construction.
-load_dotenv(override=True)
+# Load .env files hierarchically:
+# 1. First try .env in current directory (for dev environment)
+# 2. Fall back to ~/.env (for production services)
+# The first file found takes precedence for vars it defines
+_local_env = Path(".env")
+_home_env = Path.home() / ".env"
+
+if _local_env.exists():
+    load_dotenv(_local_env, override=True)
+elif _home_env.exists():
+    load_dotenv(_home_env, override=True)
+else:
+    load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +165,16 @@ class BackupLLMSettingsMixin:
 class DBSettings(HonchoSettings):
     model_config = SettingsConfigDict(env_prefix="DB_", extra="ignore")  # pyright: ignore
 
-    CONNECTION_URI: str | None = None  # Must be set via environment (no hardcoded default)
+    CONNECTION_URI: Annotated[
+        str | None,
+        Field(
+            default=None,
+            validation_alias=AliasChoices(
+                "HONCHO_DB_CONNECTION_URI",
+                "DB_CONNECTION_URI",
+            ),
+        ),
+    ]  # Must be set via environment (no hardcoded default)
     SCHEMA: str = "public"
 
     @model_validator(mode="after")  # type: ignore
@@ -164,7 +183,7 @@ class DBSettings(HonchoSettings):
         if not self.CONNECTION_URI:
             raise ValueError(
                 "DB.CONNECTION_URI must be set. "
-                "Set the HONCHO_DATABASE__CONNECTION_URI or DB_CONNECTION_URI "
+                "Set the HONCHO_DB_CONNECTION_URI or DB_CONNECTION_URI "
                 "environment variable with your database connection string."
             )
         return self
@@ -632,6 +651,36 @@ class VectorStoreSettings(HonchoSettings):
         return self
 
 
+class HybridSearchSettings(BaseModel):
+    """Settings for hybrid search combining vector, FTS, and trigram."""
+
+    model_config = SettingsConfigDict(populate_by_name=True)  # pyright: ignore
+
+    ENABLED: bool = True
+    DEFAULT_METHOD: Literal["rrf", "weighted", "cascade"] = "rrf"
+    RRF_K: Annotated[int, Field(default=60, gt=0)] = 60
+    WEIGHTS: dict[str, float] = Field(default_factory=lambda: {
+        "vector": 0.5,
+        "fts": 0.35,
+        "trigram": 0.15,
+    })
+    TRIGRAM_THRESHOLD: Annotated[float, Field(default=0.3, gt=0.0, le=1.0)] = 0.3
+
+
+class RerankerSettings(BaseModel):
+    """Settings for cross-encoder reranking after retrieval."""
+
+    model_config = SettingsConfigDict(populate_by_name=True)  # pyright: ignore
+
+    ENABLED: bool = False  # Disabled by default
+    PROVIDER: Literal["ollama", "local"] = "ollama"
+    MODEL: str = "qllama/bge-reranker-large:f16"
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    TOP_K: Annotated[int, Field(default=10, gt=0, le=100)] = 10
+    BATCH_SIZE: Annotated[int, Field(default=32, gt=0, le=128)] = 32
+    TIMEOUT_SECONDS: Annotated[float, Field(default=30.0, gt=0.0)] = 30.0
+
+
 class AppSettings(HonchoSettings):
     # No env_prefix for app-level settings
     model_config = SettingsConfigDict(  # pyright: ignore
@@ -640,6 +689,7 @@ class AppSettings(HonchoSettings):
 
     # Application-wide settings
     LOG_LEVEL: str = "INFO"
+    HONCHO_PORT: int = 8000
     SESSION_OBSERVERS_LIMIT: Annotated[int, Field(default=10, gt=0)] = 10
     MAX_FILE_SIZE: Annotated[int, Field(default=5_242_880, gt=0)] = 5_242_880  # 5MB
     GET_CONTEXT_MAX_TOKENS: Annotated[int, Field(default=100_000, gt=0, le=250_000)] = (
@@ -676,6 +726,8 @@ class AppSettings(HonchoSettings):
     CACHE: CacheSettings = Field(default_factory=CacheSettings)
     DREAM: DreamSettings = Field(default_factory=DreamSettings)
     VECTOR_STORE: VectorStoreSettings = Field(default_factory=VectorStoreSettings)
+    HYBRID_SEARCH: HybridSearchSettings = Field(default_factory=HybridSearchSettings)
+    RERANKER: RerankerSettings = Field(default_factory=RerankerSettings)
 
     @field_validator("LOG_LEVEL")
     def validate_log_level(cls, v: str) -> str:

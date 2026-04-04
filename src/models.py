@@ -10,6 +10,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Computed,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -20,7 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TEXT
+from sqlalchemy.dialects.postgresql import JSONB, TEXT, TSVECTOR
 from sqlalchemy.orm import Mapped, MappedColumn, mapped_column, relationship
 from sqlalchemy.sql import func
 from typing_extensions import override
@@ -380,6 +381,12 @@ class Document(Base):
         "internal_metadata", JSONB, default=dict, server_default=text("'{}'::jsonb")
     )
     content: Mapped[str] = mapped_column(TEXT)
+    # Full-text search vector - automatically generated from content
+    content_tsv: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', content)", persisted=True),
+        nullable=True,
+    )
     level: Mapped[DocumentLevel] = mapped_column(
         TEXT, nullable=False, server_default="explicit"
     )

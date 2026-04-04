@@ -6,7 +6,7 @@ API contract.
 
 import datetime
 import ipaddress
-from typing import Annotated, Any, Self, cast
+from typing import Annotated, Any, Literal, Self, cast
 from urllib.parse import urlparse
 
 import tiktoken
@@ -458,6 +458,8 @@ class ConclusionQuery(BaseModel):
     """Query parameters for semantic search of conclusions."""
 
     query: str = Field(..., description="Semantic search query")
+    observer: str = Field(..., description="Peer making the observation")
+    observed: str = Field(..., description="Peer being observed")
     top_k: int = Field(
         default=10,
         ge=1,
@@ -472,7 +474,7 @@ class ConclusionQuery(BaseModel):
     )
     filters: dict[str, Any] | None = Field(
         default=None,
-        description="Additional filters to apply",
+        description="Additional filters (e.g., level, session_name)",
     )
 
 
@@ -535,6 +537,44 @@ class MessageSearchOptions(BaseModel):
         ge=1,
         le=100,
         description="Number of results to return",
+    )
+
+    @field_validator("query", mode="after")
+    @classmethod
+    def sanitize_query(cls, v: str) -> str:
+        return v.replace("\x00", "")
+
+
+# ---------------------------------------------------------------------------
+# Document search schemas
+# ---------------------------------------------------------------------------
+
+
+class DocumentSearch(BaseModel):
+    """Search parameters for hybrid document search."""
+
+    query: str = Field(..., description="Search query")
+    observer: str = Field(..., description="Peer making the observation")
+    observed: str = Field(..., description="Peer being observed")
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Number of results to return",
+    )
+    distance: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Maximum cosine distance threshold for results",
+    )
+    method: Literal["rrf", "weighted", "cascade"] = Field(
+        default="rrf",
+        description="Fusion method: rrf (Reciprocal Rank Fusion), weighted, or cascade",
+    )
+    filters: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional filters (e.g., level, session_name)",
     )
 
     @field_validator("query", mode="after")

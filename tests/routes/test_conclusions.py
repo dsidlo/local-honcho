@@ -378,9 +378,9 @@ class TestConclusionRoutes:
             f"/v3/workspaces/{test_workspace.name}/conclusions/query",
             json={
                 "query": "food preferences",
+                "observer": test_peer.name,
+                "observed": test_peer2.name,
                 "filters": {
-                    "observer": test_peer.name,
-                    "observed": test_peer2.name,
                     "session_id": test_session.name,
                 },
             },
@@ -444,11 +444,8 @@ class TestConclusionRoutes:
             json={
                 "query": "relevant topic",
                 "top_k": 2,
-                "filters": {
-                    "observer": test_peer.name,
-                    "observed": test_peer2.name,
-                    "session_id": test_session.name,
-                },
+                "observer": test_peer.name,
+                "observed": test_peer2.name,
             },
         )
 
@@ -503,9 +500,9 @@ class TestConclusionRoutes:
             json={
                 "query": "test",
                 "distance": 0.8,
+                "observer": test_peer.name,
+                "observed": test_peer2.name,
                 "filters": {
-                    "observer": test_peer.name,
-                    "observed": test_peer2.name,
                     "session_id": test_session.name,
                 },
             },
@@ -522,7 +519,7 @@ class TestConclusionRoutes:
         db_session: AsyncSession,
         sample_data: tuple[Workspace, Peer],
     ):
-        """Test query conclusions requires observer and observed in filters"""
+        """Test query conclusions requires observer and observed params"""
         test_workspace, _test_peer = sample_data
 
         # Create a session
@@ -532,12 +529,18 @@ class TestConclusionRoutes:
         db_session.add(test_session)
         await db_session.commit()
 
-        # Query without observer/observed filters should fail
+        # Query without observer should fail (422 validation error)
         response = client.post(
             f"/v3/workspaces/{test_workspace.name}/conclusions/query",
-            json={"query": "test"},
+            json={"query": "test", "observed": "some-peer"},
         )
+        assert response.status_code == 422
 
+        # Query without observed should fail (422 validation error)
+        response = client.post(
+            f"/v3/workspaces/{test_workspace.name}/conclusions/query",
+            json={"query": "test", "observer": "some-peer"},
+        )
         assert response.status_code == 422
 
     @pytest.mark.asyncio
@@ -570,11 +573,8 @@ class TestConclusionRoutes:
             json={
                 "query": "test",
                 "top_k": 101,  # Max is 100
-                "filters": {
-                    "observer": test_peer.name,
-                    "observed": test_peer2.name,
-                    "session_id": test_session.name,
-                },
+                "observer": test_peer.name,
+                "observed": test_peer2.name,
             },
         )
 

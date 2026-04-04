@@ -228,15 +228,12 @@ class ConclusionScope:
             List of matching Conclusion objects
         """
         self._honcho._ensure_workspace()
-        filters: dict[str, Any] = {
-            "observer_id": self.observer,
-            "observed_id": self.observed,
-        }
 
         body: dict[str, Any] = {
             "query": query,
+            "observer": self.observer,
+            "observed": self.observed,
             "top_k": top_k,
-            "filters": filters,
         }
         if distance is not None:
             body["distance"] = distance

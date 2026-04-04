@@ -833,7 +833,7 @@ async def search_memory(
     if levels:
         filters = {"level": {"in": levels}}
 
-    documents = await crud.query_documents(
+    documents = await crud.query_documents_hybrid(
         db=db,
         workspace_name=workspace_name,
         observer=observer,
@@ -842,6 +842,7 @@ async def search_memory(
         top_k=limit,
         filters=filters,
         embedding=embedding,
+        method="rrf",
     )
 
     return Representation.from_documents(documents)
@@ -1245,7 +1246,7 @@ async def _handle_search_memory(ctx: ToolContext, tool_input: dict[str, Any]) ->
     except ValueError:
         return f"ERROR: Query exceeds maximum token limit of {settings.MAX_EMBEDDING_TOKENS}. Please use a shorter query."
 
-    documents = await crud.query_documents(
+    documents = await crud.query_documents_hybrid(
         db=ctx.db,
         workspace_name=ctx.workspace_name,
         observer=ctx.observer,
@@ -1253,6 +1254,7 @@ async def _handle_search_memory(ctx: ToolContext, tool_input: dict[str, Any]) ->
         query=query,
         top_k=top_k,
         embedding=query_embedding,
+        method="rrf",
     )
     mem = Representation.from_documents(documents)
     total_count = mem.len()
