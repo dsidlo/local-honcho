@@ -1,6 +1,8 @@
 import logging
 from contextlib import suppress
 
+from typing import Literal
+
 from fastapi import APIRouter, Body, Depends, Path, Query, Response
 from fastapi_pagination import Page
 from fastapi_pagination.ext.sqlalchemy import apaginate
@@ -44,6 +46,8 @@ async def _get_working_representation_task(
     include_most_derived: bool,
     max_observations: int | None,
     embedding: list[float] | None = None,
+    use_hybrid: bool = False,
+    hybrid_method: Literal["rrf", "weighted", "cascade"] = "rrf",
 ) -> Representation:
     """
     Get working representation using an externally-provided DB session.
@@ -60,6 +64,8 @@ async def _get_working_representation_task(
         include_most_derived: Whether to include the most derived observations in the representation
         max_observations: Maximum number of observations to include in the representation
         embedding: Pre-computed embedding for the semantic query
+        use_hybrid: Whether to use hybrid search (vector + FTS + trigram)
+        hybrid_method: Fusion method for hybrid search ('rrf', 'weighted', or 'cascade')
 
     Returns:
         The working representation
@@ -78,6 +84,8 @@ async def _get_working_representation_task(
         max_observations=max_observations
         if max_observations is not None
         else config.settings.DERIVER.WORKING_REPRESENTATION_MAX_OBSERVATIONS,
+        use_hybrid=use_hybrid,
+        hybrid_method=hybrid_method,
     )
 
 
@@ -659,6 +667,15 @@ async def get_session_context(
         le=100,
         description="Only used if `search_query` is provided. The maximum number of conclusions to include in the representation",
     ),
+    # NEW: Hybrid search parameters
+    search_use_hybrid: bool = Query(
+        default=False,
+        description="Only used if `search_query` is provided. Whether to use hybrid search (vector + FTS + trigram) for retrieving relevant conclusions",
+    ),
+    search_hybrid_method: Literal["rrf", "weighted", "cascade"] = Query(
+        default="rrf",
+        description="Only used if `search_use_hybrid` is true. The fusion method for combining vector, FTS, and trigram search results. Options: 'rrf' (Reciprocal Rank Fusion), 'weighted' (linear combination), 'cascade' (try vector first, then fall back)",
+    ),
 ):
     """
     Produce a context object from the Session. The caller provides an optional token limit which the entire context must fit into.
@@ -708,6 +725,8 @@ async def get_session_context(
         include_most_derived=include_most_frequent,
         max_observations=max_conclusions,
         embedding=embedding,
+        use_hybrid=search_use_hybrid,
+        hybrid_method=search_hybrid_method,
     )
     card = await _get_peer_card_task(
         db, workspace_id, observer=observer, observed=observed

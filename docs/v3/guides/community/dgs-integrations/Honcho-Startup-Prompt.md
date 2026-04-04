@@ -100,7 +100,7 @@ OLLAMA_API_KEY=fbcxxxxxxxxxxxxxxxxxxxxxxxxxxrD
 LOG_LEVEL=INFO
 
 # Alternative Keys (backup/alternates)
-GEMINI_API_KEY=AIzaSyDxRZRVXfAs_yw_456_T0JwHQsCioIq6Ww
+GEMINI_API_KEY=AIxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxWw
 OPENAI_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx5HgA"
 OPENAI_ORG_KEY=org-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpVy
 XAI_API_KEY=xai-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxBS

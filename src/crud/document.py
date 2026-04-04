@@ -1,9 +1,9 @@
 import datetime
 from collections.abc import Sequence
 from logging import getLogger
-from typing import Any, cast
+from typing import Any, Literal, cast
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1010,3 +1010,398 @@ async def get_child_observations(
 
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+# =============================================================================
+# Hybrid Search Functions - Vector + FTS + Trigram
+# =============================================================================
+
+
+async def query_documents_hybrid(
+    db: AsyncSession,
+    workspace_name: str,
+    query: str,
+    *,
+    observer: str,
+    observed: str,
+    embedding: list[float] | None = None,
+    filters: dict[str, Any] | None = None,
+    max_distance: float | None = None,
+    top_k: int = 10,
+    method: Literal["rrf", "weighted", "cascade"] = "rrf",
+    rrf_k: int = 60,
+    weights: dict[str, float] | None = None,
+) -> Sequence[models.Document]:
+    """
+    Hybrid search combining vector, FTS, and trigram search methods.
+
+    Combines semantic vector search with PostgreSQL full-text search (BM25-like)
+    and trigram fuzzy matching for improved retrieval of technical terms,
+    proper nouns, and typo-tolerant matching.
+
+    Args:
+        db: Database session
+        workspace_name: Name of the workspace
+        query: Search query text
+        observer: Name of the observing peer
+        observed: Name of the observed peer
+        embedding: Optional pre-computed embedding for the query
+        filters: Optional filters (level, session_name)
+        max_distance: Maximum cosine distance for vector results
+        top_k: Number of results to return
+        method: Fusion strategy - "rrf" (Reciprocal Rank Fusion - default),
+               "weighted" (linear combination), or "cascade" (fallback chain)
+        rrf_k: Constant for RRF (higher = more weight to lower ranks). Default 60.
+        weights: Score weights for "weighted" method.
+                Default: {"vector": 0.5, "fts": 0.35, "trigram": 0.15}
+
+    Returns:
+        Sequence of matching documents, ranked by the chosen fusion method
+    """
+    # Generate embedding if not provided
+    if embedding is None:
+        try:
+            embedding = await embedding_client.embed(query)
+        except ValueError as e:
+            raise ValidationException(
+                f"Query exceeds maximum token limit of {settings.MAX_EMBEDDING_TOKENS}."
+            ) from e
+
+    # Build base filter conditions
+    base_filters = [
+        models.Document.workspace_name == workspace_name,
+        models.Document.observer == observer,
+        models.Document.observed == observed,
+        models.Document.embedding.isnot(None),
+        models.Document.deleted_at.is_(None),
+    ]
+
+    # Apply optional filters
+    if filters:
+        if "level" in filters:
+            base_filters.append(models.Document.level == filters["level"])
+        if "session_name" in filters:
+            base_filters.append(models.Document.session_name == filters["session_name"])
+
+    # Dispatch to the appropriate method
+    if method == "cascade":
+        return await _hybrid_cascade(
+            db, query, embedding, base_filters, max_distance, top_k
+        )
+    elif method == "weighted":
+        return await _hybrid_weighted(
+            db, query, embedding, base_filters, max_distance, top_k, weights
+        )
+    else:  # rrf (default)
+        results = await _hybrid_rrf(
+            db, query, embedding, base_filters, max_distance, top_k * 2, rrf_k
+        )
+        # Apply cross-encoder reranking if enabled
+        if settings.RERANKER.ENABLED:
+            from src.reranker_client import rerank_documents
+
+            # Rerank and take top_k from reranked results
+            results = await rerank_documents(
+                query=query,
+                documents=list(results),
+                top_k=top_k,
+            )
+        else:
+            # When reranking is disabled, slice to top_k
+            results = results[:top_k]
+        return results
+
+
+async def _hybrid_rrf(
+    db: AsyncSession,
+    query: str,
+    embedding: list[float],
+    base_filters: list,
+    max_distance: float | None,
+    top_k: int,
+    rrf_k: int = 60,
+) -> Sequence[models.Document]:
+    """
+    Reciprocal Rank Fusion - combines ranked lists from vector, FTS, and trigram.
+
+    RRF score = Σ(1 / (rank + k)) for each list where doc appears.
+    Higher scores = better ranking across multiple retrieval methods.
+    """
+    extended_limit = top_k * 2  # Get more results for better fusion
+
+    # Vector search subquery
+    vector_dist = models.Document.embedding.cosine_distance(embedding)
+    vector_stmt = (
+        select(
+            models.Document.id,
+            vector_dist.label("distance"),
+        )
+        .where(*base_filters)
+    )
+    if max_distance is not None:
+        vector_stmt = vector_stmt.where(vector_dist <= max_distance)
+    vector_stmt = vector_stmt.order_by(vector_dist).limit(extended_limit)
+
+    # FTS search subquery - convert query to plainto_tsquery
+    fts_query_text = func.plainto_tsquery("english", query)
+    fts_stmt = (
+        select(
+            models.Document.id,
+            func.ts_rank_cd(models.Document.content_tsv, fts_query_text).label("fts_score"),
+        )
+        .where(*base_filters)
+        .where(models.Document.content_tsv.op("@@")(fts_query_text))
+        .order_by(func.ts_rank_cd(models.Document.content_tsv, fts_query_text).desc())
+        .limit(extended_limit)
+    )
+
+    # Trigram search subquery - similarity-based fuzzy matching
+    trigram_stmt = (
+        select(
+            models.Document.id,
+            func.similarity(models.Document.content, query).label("trigram_score"),
+        )
+        .where(*base_filters)
+        .where(models.Document.content.op("%")(query))  # % = similarity operator
+        .order_by(func.similarity(models.Document.content, query).desc())
+        .limit(extended_limit)
+    )
+
+    # Execute all three queries
+    vector_result = await db.execute(vector_stmt)
+    fts_result = await db.execute(fts_stmt)
+    trigram_result = await db.execute(trigram_stmt)
+
+    # Build rank dictionaries: {doc_id: rank}
+    vector_ids = {row[0]: rank for rank, row in enumerate(vector_result.fetchall(), 1)}
+    fts_ids = {row[0]: rank for rank, row in enumerate(fts_result.fetchall(), 1)}
+    trigram_ids = {row[0]: rank for rank, row in enumerate(trigram_result.fetchall(), 1)}
+
+    # Calculate RRF scores for all unique document IDs
+    all_ids = set(vector_ids.keys()) | set(fts_ids.keys()) | set(trigram_ids.keys())
+    rrf_scores = {}
+
+    for doc_id in all_ids:
+        score = 0.0
+        if doc_id in vector_ids:
+            score += 1.0 / (rrf_k + vector_ids[doc_id])
+        if doc_id in fts_ids:
+            score += 1.0 / (rrf_k + fts_ids[doc_id])
+        if doc_id in trigram_ids:
+            score += 1.0 / (rrf_k + trigram_ids[doc_id])
+        rrf_scores[doc_id] = score
+
+    if not rrf_scores:
+        return []
+
+    # Sort by RRF score descending and take top_k
+    sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)[:top_k]
+
+    # Fetch full documents
+    stmt = select(models.Document).where(
+        models.Document.id.in_(sorted_ids),
+        *base_filters
+    )
+    result = await db.execute(stmt)
+    docs_by_id = {doc.id: doc for doc in result.scalars().all()}
+
+    # Return in RRF order (preserving fusion ranking)
+    return [docs_by_id[doc_id] for doc_id in sorted_ids if doc_id in docs_by_id]
+
+
+async def _hybrid_weighted(
+    db: AsyncSession,
+    query: str,
+    embedding: list[float],
+    base_filters: list,
+    max_distance: float | None,
+    top_k: int,
+    weights: dict[str, float] | None = None,
+) -> Sequence[models.Document]:
+    """
+    Weighted linear combination of normalized vector, FTS, and trigram scores.
+
+    Score = w_vector * vector_score + w_fts * fts_score + w_trigram * trigram_score
+    """
+    if weights is None:
+        weights = {"vector": 0.5, "fts": 0.35, "trigram": 0.15}
+
+    # Ensure weights sum to 1 for balanced scoring
+    total_weight = sum(weights.values())
+    if total_weight <= 0:
+        weights = {"vector": 0.5, "fts": 0.35, "trigram": 0.15}
+    else:
+        weights = {k: v / total_weight for k, v in weights.items()}
+
+    extended_limit = top_k * 3  # Need more for proper normalization
+
+    # Get vector results with scores
+    vector_dist = models.Document.embedding.cosine_distance(embedding)
+    vector_stmt = (
+        select(
+            models.Document.id,
+            (1 - vector_dist).label("vector_score"),
+        )
+        .where(*base_filters)
+    )
+    if max_distance is not None:
+        vector_stmt = vector_stmt.where(vector_dist <= max_distance)
+    vector_stmt = vector_stmt.order_by(vector_dist).limit(extended_limit)
+
+    # Get FTS results with scores
+    fts_query_text = func.plainto_tsquery("english", query)
+    fts_stmt = (
+        select(
+            models.Document.id,
+            func.ts_rank_cd(models.Document.content_tsv, fts_query_text).label("fts_score"),
+        )
+        .where(*base_filters)
+        .where(models.Document.content_tsv.op("@@")(fts_query_text))
+        .order_by(func.ts_rank_cd(models.Document.content_tsv, fts_query_text).desc())
+        .limit(extended_limit)
+    )
+
+    # Get trigram results with scores
+    trigram_stmt = (
+        select(
+            models.Document.id,
+            func.similarity(models.Document.content, query).label("trigram_score"),
+        )
+        .where(*base_filters)
+        .where(models.Document.content.op("%")(query))
+        .order_by(func.similarity(models.Document.content, query).desc())
+        .limit(extended_limit)
+    )
+
+    # Execute queries
+    vector_result = await db.execute(vector_stmt)
+    fts_result = await db.execute(fts_stmt)
+    trigram_result = await db.execute(trigram_stmt)
+
+    # Build score dictionaries
+    vector_scores = {row[0]: float(row[1]) for row in vector_result.fetchall()}
+    fts_scores = {row[0]: float(row[1]) for row in fts_result.fetchall()}
+    trigram_scores = {row[0]: float(row[1]) for row in trigram_result.fetchall()}
+
+    # Find max scores for normalization (avoid division by zero)
+    max_vector = max(vector_scores.values()) if vector_scores else 1.0
+    max_fts = max(fts_scores.values()) if fts_scores else 1.0
+    max_trigram = max(trigram_scores.values()) if trigram_scores else 1.0
+
+    # Normalize and combine scores
+    all_ids = set(vector_scores.keys()) | set(fts_scores.keys()) | set(trigram_scores.keys())
+    combined_scores = {}
+
+    for doc_id in all_ids:
+        # Normalize each score to 0-1 range
+        norm_vector = vector_scores.get(doc_id, 0.0) / max_vector if max_vector > 0 else 0.0
+        norm_fts = fts_scores.get(doc_id, 0.0) / max_fts if max_fts > 0 else 0.0
+        norm_trigram = trigram_scores.get(doc_id, 0.0) / max_trigram if max_trigram > 0 else 0.0
+
+        # Weighted combination
+        combined = (
+            weights.get("vector", 0.5) * norm_vector +
+            weights.get("fts", 0.35) * norm_fts +
+            weights.get("trigram", 0.15) * norm_trigram
+        )
+        combined_scores[doc_id] = combined
+
+    if not combined_scores:
+        return []
+
+    # Sort by combined score and take top_k
+    sorted_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:top_k]
+
+    # Fetch full documents
+    stmt = select(models.Document).where(
+        models.Document.id.in_(sorted_ids),
+        *base_filters
+    )
+    result = await db.execute(stmt)
+    docs_by_id = {doc.id: doc for doc in result.scalars().all()}
+
+    return [docs_by_id[doc_id] for doc_id in sorted_ids if doc_id in docs_by_id]
+
+
+async def _hybrid_cascade(
+    db: AsyncSession,
+    query: str,
+    embedding: list[float],
+    base_filters: list,
+    max_distance: float | None,
+    top_k: int,
+) -> Sequence[models.Document]:
+    """
+    Cascade fallback: Try vector first, fall back to FTS, then trigram if needed.
+
+    This method is designed for low-latency scenarios where vector search is
+    expected to provide good results. Only falls back to FTS/trigram when
+    vector results are insufficient.
+    """
+    results: list[models.Document] = []
+    seen_ids: set[str] = set()
+
+    # Step 1: Try vector search
+    vector_dist = models.Document.embedding.cosine_distance(embedding)
+    vector_stmt = (
+        select(models.Document)
+        .where(*base_filters)
+    )
+    if max_distance is not None:
+        vector_stmt = vector_stmt.where(vector_dist <= max_distance)
+    vector_stmt = vector_stmt.order_by(vector_dist).limit(top_k)
+
+    result = await db.execute(vector_stmt)
+    vector_docs = list(result.scalars().all())
+
+    for doc in vector_docs:
+        if doc.id not in seen_ids:
+            results.append(doc)
+            seen_ids.add(doc.id)
+
+    # If we have enough results, return them
+    if len(results) >= top_k:
+        return results[:top_k]
+
+    # Step 2: Fall back to FTS
+    remaining = top_k - len(results)
+    fts_query_text = func.plainto_tsquery("english", query)
+    fts_stmt = (
+        select(models.Document)
+        .where(*base_filters)
+        .where(models.Document.content_tsv.op("@@")(fts_query_text))
+        .order_by(func.ts_rank_cd(models.Document.content_tsv, fts_query_text).desc())
+        .limit(remaining)
+    )
+
+    result = await db.execute(fts_stmt)
+    fts_docs = list(result.scalars().all())
+
+    for doc in fts_docs:
+        if doc.id not in seen_ids:
+            results.append(doc)
+            seen_ids.add(doc.id)
+
+    # If we have enough results, return them
+    if len(results) >= top_k:
+        return results[:top_k]
+
+    # Step 3: Fall back to trigram
+    remaining = top_k - len(results)
+    trigram_stmt = (
+        select(models.Document)
+        .where(*base_filters)
+        .where(models.Document.content.op("%")(query))
+        .order_by(func.similarity(models.Document.content, query).desc())
+        .limit(remaining)
+    )
+
+    result = await db.execute(trigram_stmt)
+    trigram_docs = list(result.scalars().all())
+
+    for doc in trigram_docs:
+        if doc.id not in seen_ids:
+            results.append(doc)
+            # No need to track seen_ids, this is the last step
+
+    return results

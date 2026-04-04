@@ -103,7 +103,7 @@ cmd_disable() {
 
 # Run installer
 cmd_install() {
-    /home/<user>/workspace/honcho/scripts/install-systemd.sh
+    /home/dsidlo/workspace/honcho/scripts/install-systemd.sh
 }
 
 # Main

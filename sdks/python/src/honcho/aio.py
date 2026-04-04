@@ -1328,15 +1328,12 @@ class ConclusionScopeAio:
     ) -> list[Conclusion]:
         """Semantic search for conclusions asynchronously."""
         await self._scope._honcho._ensure_workspace_async()
-        filters: dict[str, Any] = {
-            "observer_id": self._scope.observer,
-            "observed_id": self._scope.observed,
-        }
 
         body: dict[str, Any] = {
             "query": query,
+            "observer": self._scope.observer,
+            "observed": self._scope.observed,
             "top_k": top_k,
-            "filters": filters,
         }
         if distance is not None:
             body["distance"] = distance

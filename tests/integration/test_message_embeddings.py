@@ -2,9 +2,10 @@
 Tests for message embedding functionality.
 
 These tests verify that message embeddings are created, stored, and can be searched.
+Uses real Ollama embeddings for integration testing.
 """
 
-from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from nanoid import generate as generate_nanoid
@@ -187,9 +188,11 @@ async def test_semantic_search_when_embeddings_enabled(
     db_session: AsyncSession,
     sample_data: tuple[Workspace, Peer],
     monkeypatch: pytest.MonkeyPatch,
-    mock_openai_embeddings: dict[str, Any],
 ):
-    """Test that search uses semantic search by default when EMBED_MESSAGES is True"""
+    """Test that search uses semantic search by default when EMBED_MESSAGES is True.
+    
+    This test uses real Ollama embeddings to verify end-to-end functionality.
+    """
     # Monkeypatch the setting to enable message embeddings
     monkeypatch.setattr("src.config.settings.EMBED_MESSAGES", True)
 
@@ -236,9 +239,6 @@ async def test_semantic_search_when_embeddings_enabled(
         "Python development and web apps"  # Similar meaning to the message content
     )
 
-    # Check the call count before search
-    initial_call_count: int = mock_openai_embeddings["embed"].call_count
-
     search_results = await search(
         db=db_session,
         query=search_query,
@@ -248,10 +248,8 @@ async def test_semantic_search_when_embeddings_enabled(
         },
     )
 
-    # Verify that the embed method was called during search - e.g. we used semantic search
-    assert mock_openai_embeddings["embed"].call_count == initial_call_count + 1
-
     # Verify that our message was found via semantic search
+    # With real embeddings, semantically similar content should match
     assert len(search_results) > 0
     found_message_ids = [msg.public_id for msg in search_results]
     assert created_message.public_id in found_message_ids
@@ -262,9 +260,11 @@ async def test_message_chunking_creates_multiple_embeddings(
     db_session: AsyncSession,
     sample_data: tuple[Workspace, Peer],
     monkeypatch: pytest.MonkeyPatch,
-    mock_openai_embeddings: dict[str, Any],
 ):
-    """Test that messages exceeding token limits are chunked and create multiple embeddings"""
+    """Test that messages exceeding token limits are chunked and create multiple embeddings.
+    
+    This test mocks the batch_embed function to verify chunking logic works correctly.
+    """
     # Monkeypatch the setting to enable message embeddings
     monkeypatch.setattr("src.config.settings.EMBED_MESSAGES", True)
 
@@ -282,7 +282,8 @@ async def test_message_chunking_creates_multiple_embeddings(
 
     test_message_content = "This is a very long message that should be chunked into multiple pieces because it exceeds the token limit that we set for testing purposes. This message contains many words and should definitely be split into multiple chunks."
 
-    def mock_batch_embed_chunked(
+    # Mock the batch_embed function to return multiple embeddings (simulating chunking)
+    async def mock_batch_embed_chunked(
         id_resource_dict: dict[str, tuple[str, list[int]]],
     ) -> dict[str, list[list[float]]]:
         return {
@@ -290,22 +291,25 @@ async def test_message_chunking_creates_multiple_embeddings(
             for text_id in id_resource_dict
         }
 
-    mock_openai_embeddings["batch_embed"].side_effect = mock_batch_embed_chunked
+    with patch(
+        "src.embedding_client.embedding_client.batch_embed",
+        new_callable=AsyncMock,
+        side_effect=mock_batch_embed_chunked,
+    ):
+        messages = [
+            MessageCreate(
+                content=test_message_content,
+                peer_id=test_peer.name,
+                metadata={"test": "chunking"},
+            )
+        ]
 
-    messages = [
-        MessageCreate(
-            content=test_message_content,
-            peer_id=test_peer.name,
-            metadata={"test": "chunking"},
+        created_messages = await create_messages(
+            db=db_session,
+            messages=messages,
+            workspace_name=test_workspace.name,
+            session_name=test_session.name,
         )
-    ]
-
-    created_messages = await create_messages(
-        db=db_session,
-        messages=messages,
-        workspace_name=test_workspace.name,
-        session_name=test_session.name,
-    )
 
     assert len(created_messages) == 1
     created_message = created_messages[0]

@@ -334,6 +334,10 @@ async def search(
     Raises:
         ValidationException: If query exceeds maximum token limit for embeddings
     """
+    # Handle empty query - return empty results early
+    if not query or not query.strip():
+        return []
+
     # Base query conditions
     stmt = select(models.Message)
 

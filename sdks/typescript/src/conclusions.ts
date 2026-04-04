@@ -114,6 +114,8 @@ export class ConclusionScope {
 
   private async _query(params: {
     query: string
+    observer: string
+    observed: string
     top_k?: number
     distance?: number
     filters?: Record<string, unknown>
@@ -224,16 +226,12 @@ export class ConclusionScope {
     topK: number = 10,
     distance?: number
   ): Promise<Conclusion[]> {
-    const filters: Record<string, unknown> = {
-      observer_id: this.observer,
-      observed_id: this.observed,
-    }
-
     const response = await this._query({
       query,
+      observer: this.observer,
+      observed: this.observed,
       top_k: topK,
       distance,
-      filters,
     })
 
     return (response ?? []).map((item) => Conclusion.fromApiResponse(item))

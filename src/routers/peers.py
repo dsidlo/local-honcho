@@ -169,10 +169,14 @@ async def chat(
     """
     # Get or create the peer to ensure it exists
     async with tracked_db("peers.chat.get_or_create_peer") as peer_db:
+        peers_to_create = [schemas.PeerCreate(name=peer_id)]
+        # Also create the target peer if specified
+        if options.target and options.target != peer_id:
+            peers_to_create.append(schemas.PeerCreate(name=options.target))
         peers_result = await crud.get_or_create_peers(
             peer_db,
             workspace_name=workspace_id,
-            peers=[schemas.PeerCreate(name=peer_id)],
+            peers=peers_to_create,
         )
         await peer_db.commit()
     await peers_result.post_commit()

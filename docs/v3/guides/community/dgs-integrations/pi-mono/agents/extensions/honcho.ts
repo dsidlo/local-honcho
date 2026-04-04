@@ -913,19 +913,36 @@ export default function (pi: ExtensionAPI) {
   });
 
   /**
-   * Tool: honcho_search_documents - Search documents
+   * Tool: honcho_search_documents - Search documents using hybrid search
    */
   pi.registerTool({
     name: "honcho_search_documents",
     label: "Search Honcho Documents",
-    description: "Search for documents in Honcho using semantic/vector search",
+    description: "Search for documents in Honcho using hybrid search (vector + FTS + trigram)",
     promptSnippet: "Search documents in Honcho",
+    promptGuidelines: [
+      "Use this to find documents stored in Honcho's memory",
+      "Requires specifying which peer made the observation and which peer is being observed",
+      "Use 'method' parameter to choose fusion strategy: rrf (default), weighted, or cascade",
+    ],
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
-      limit: Type.Number({ default: 5 }),
-      level: Type.Optional(Type.String({ 
-        enum: ["user", "session", "workspace"],
-        description: "Filter by document level" 
+      observer: Type.String({ 
+        description: "Peer making the observation (who stored the document)",
+        default: HONCHO_USER 
+      }),
+      observed: Type.String({ 
+        description: "Peer being observed (what the document is about)",
+        default: HONCHO_PEER_ID 
+      }),
+      top_k: Type.Number({ default: 5, description: "Number of results to return" }),
+      method: Type.Optional(Type.String({ 
+        enum: ["rrf", "weighted", "cascade"],
+        default: "rrf",
+        description: "Fusion method: rrf (Reciprocal Rank Fusion), weighted, or cascade" 
+      })),
+      filters: Type.Optional(Type.Record(Type.String(), Type.Any(), { 
+        description: "Additional filters (e.g., {level: 'session', session_name: '...'})" 
       })),
     }),
     async execute(_toolCallId, params) {
@@ -933,9 +950,12 @@ export default function (pi: ExtensionAPI) {
       
       const body: any = {
         query: params.query,
-        limit: params.limit || 5,
+        observer: params.observer || HONCHO_USER,
+        observed: params.observed || HONCHO_PEER_ID,
+        top_k: params.top_k || 5,
+        method: params.method || "rrf",
       };
-      if (params.level) body.level = params.level;
+      if (params.filters) body.filters = params.filters;
       
       const result = await honchoFetch(url, {
         method: "POST",
@@ -943,7 +963,7 @@ export default function (pi: ExtensionAPI) {
       });
       
       const docs = result
-        ?.map((d: any) => `[${d.score?.toFixed(2) || "N/A"}] ${d.name}:\n${d.content?.substring(0, 300)}...`)
+        ?.map((d: any) => `[${d.score?.toFixed(2) || "N/A"}] ${d.content?.substring(0, 300)}...`)
         ?.join("\n\n");
       
       return {

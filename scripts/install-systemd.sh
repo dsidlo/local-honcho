@@ -25,13 +25,13 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # Check prerequisites
 check_prerequisites() {
     log_info "Checking prerequisites..."
-
+    
     # Check if systemd is available
     if ! command -v systemctl &> /dev/null; then
         log_error "systemctl not found. Is systemd installed?"
         exit 1
     fi
-
+    
     # Check ifHoncho directory exists
     if [ ! -d "$HONCHO_DIR" ]; then
         log_warn "Honcho directory not found at $HONCHO_DIR"
@@ -43,7 +43,7 @@ check_prerequisites() {
         echo "  4) Exit"
         read -p "Choice [1]: " choice
         choice=${choice:-1}
-
+        
         case $choice in
             1)
                 log_info "Copying from $(pwd) to $HONCHO_DIR..."
@@ -64,7 +64,7 @@ check_prerequisites() {
                 ;;
         esac
     fi
-
+    
     # Check for virtual environment
     if [ ! -d "$HONCHO_DIR/.venv" ]; then
         log_warn "Virtual environment not found at $HONCHO_DIR/.venv"
@@ -72,22 +72,22 @@ check_prerequisites() {
         cd "$HONCHO_DIR"
         uv sync
     fi
-
+    
     # Check for .env file
     if [ ! -f "$USER_ENV" ]; then
         log_warn "Environment file not found at $USER_ENV"
         log_info "Creating from template..."
-
+        
         cat > "$USER_ENV" << 'ENVFILE'
 # Honcho Configuration
 HONCHO_BASE_URL=http://localhost:8000
 HONCHO_WORKSPACE=default
-HONCHO_USER=<user>
+HONCHO_USER=dsidlo
 HONCHO_AGENT_ID=agent-pi-mono
 HONCHO_WORKSPACE_MODE=auto
 
 # Database
-DB_CONNECTION_URI=postgresql+psycopg://<user>@localhost:5433/postgres
+DB_CONNECTION_URI=postgresql+psycopg://dsidlo@localhost:5433/postgres
 
 # LLM Configuration
 LLM_VLLM_BASE_URL=http://localhost:11434/v1
@@ -105,20 +105,20 @@ DERIVER_DEDUPLICATE=true
 
 # Add your other DERIVER, DIALECTIC, DREAM settings here
 ENVFILE
-
+        
         log_warn "Please edit $USER_ENV with your actual configuration"
         read -p "Press Enter to continue or Ctrl+C to exit..."
     fi
-
+    
     log_info "Prerequisites check complete"
 }
 
 # Create service files
 create_services() {
     log_info "Creating systemd service files..."
-
+    
     mkdir -p "$SERVICE_DIR"
-
+    
     # Create API service
     cat > "$SERVICE_DIR/honcho-api.service" << EOF
 [Unit]
@@ -173,7 +173,7 @@ EOF
 
     chmod 644 "$SERVICE_DIR/honcho-api.service"
     chmod 644 "$SERVICE_DIR/honcho-deriver.service"
-
+    
     log_info "Service files created at:"
     log_info "  - $SERVICE_DIR/honcho-api.service"
     log_info "  - $SERVICE_DIR/honcho-deriver.service"
@@ -182,14 +182,14 @@ EOF
 # Reload and enable systemd
 configure_systemd() {
     log_info "Configuring systemd..."
-
+    
     # Reload systemd
     systemctl --user daemon-reload
-
+    
     # Enable services
     systemctl --user enable honcho-api.service
     systemctl --user enable honcho-deriver.service
-
+    
     log_info "Services enabled for auto-start"
 }
 
@@ -217,7 +217,7 @@ if [[ $confirm =~ ^[Yy]$ ]]; then
     check_prerequisites
     create_services
     configure_systemd
-
+    
     echo ""
     log_info "Installation complete!"
     echo ""
@@ -229,7 +229,7 @@ if [[ $confirm =~ ^[Yy]$ ]]; then
     echo ""
     read -p "Start services now? [Y/n]: " start_now
     start_now=${start_now:-Y}
-
+    
     if [[ $start_now =~ ^[Yy]$ ]]; then
         log_info "Starting services..."
         systemctl --user start honcho-api.service

@@ -154,6 +154,53 @@ async def search_workspace(
     return await search(db, body.query, filters=filters, limit=body.limit)
 
 
+@router.post(
+    "/{workspace_id}/documents/search",
+    response_model=list[schemas.Conclusion],
+    dependencies=[Depends(require_auth(workspace_name="workspace_id"))],
+)
+async def search_documents(
+    workspace_id: str = Path(...),
+    body: schemas.DocumentSearch = Body(
+        ..., description="Document search parameters"
+    ),
+    db: AsyncSession = db,
+) -> list[schemas.Conclusion]:
+    """
+    Search documents/conclusions using hybrid search (vector + FTS + trigram).
+
+    Combines semantic vector search with PostgreSQL full-text search and trigram
+    fuzzy matching for improved retrieval. Results are optionally reranked using
+    a cross-encoder when enabled in configuration.
+
+    Args:
+        workspace_id: Workspace to search in
+        body: Search parameters including:
+            - query: Search query text
+            - observer: Peer making the observation
+            - observed: Peer being observed
+            - top_k: Number of results (default 10)
+            - distance: Max cosine distance threshold (optional)
+            - method: Fusion method - "rrf" (default), "weighted", or "cascade"
+            - filters: Additional filters (level, session_name)
+
+    Returns:
+        List of matching conclusions ranked by relevance
+    """
+    documents = await crud.query_documents_hybrid(
+        db,
+        workspace_name=workspace_id,
+        query=body.query,
+        observer=body.observer,
+        observed=body.observed,
+        filters=body.filters,
+        max_distance=body.distance,
+        top_k=body.top_k,
+        method=body.method,
+    )
+    return [schemas.Conclusion.model_validate(doc) for doc in documents]
+
+
 @router.get(
     "/{workspace_id}/queue/status",
     response_model=schemas.QueueStatus,

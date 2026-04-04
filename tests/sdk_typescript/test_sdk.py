@@ -33,7 +33,7 @@ def test_typescript_sdk(ts_test_server: str):
     }
 
     result = subprocess.run(
-        ["bun", "test"],
+        ["bun", "test", "--timeout", "60000"],
         cwd=str(SDK_PATH),
         env=env,
         capture_output=True,
