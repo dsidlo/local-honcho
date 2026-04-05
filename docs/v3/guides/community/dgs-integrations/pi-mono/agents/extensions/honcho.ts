@@ -771,11 +771,24 @@ export default function (pi: ExtensionAPI) {
     await queueMessage(convText, HONCHO_PEER_ID, { type: 'obs_extraction', session_part: 'compact' });
     await flushMessages(); // Upload to trigger potential Dreaming
 
-    // Retrieve from Honcho for summary
-    const searchResult = await honchoFetch(
-      `/workspaces/${HONCHO_WORKSPACE}/documents/search`,
-      { method: 'POST', body: JSON.stringify({ query: 'recent observations pi session', limit: 10 }) }
-    );
+    // Retrieve from Honcho for summary (use conclusions/query - documents/search is 404)
+    let searchResult: any[] = [];
+    try {
+      searchResult = await honchoFetch(
+        `/workspaces/${HONCHO_WORKSPACE}/conclusions/query`,
+        { method: 'POST', body: JSON.stringify({ 
+          query: 'recent observations pi session', 
+          top_k: 10,
+          filters: { level: 'synthesis' }
+        }) }
+      );
+    } catch (e: any) {
+      if (e.message?.includes('404')) {
+        console.log('[Honcho] conclusions/query 404, using empty results');
+      } else {
+        throw e;
+      }
+    }
 
     let summary = '';
     let details: any = { strategy: 'honcho-obs' };
@@ -833,15 +846,22 @@ export default function (pi: ExtensionAPI) {
     await queueMessage(branchSummary, HONCHO_PEER_ID, { ...branchMetadata, level: 'inductive' });
     await flushMessages();
 
-    // Retrieve similar branches for enriched summary (e.g., patterns from past merges)
-    const searchResult = await honchoFetch(
-      `/workspaces/${HONCHO_WORKSPACE}/documents/search`,
-      { method: 'POST', body: JSON.stringify({ 
-        query: 'branch observations tree merge',
-        limit: 5,
-        metadata_filter: { branch: true } // Honcho supports metadata queries
-      }) }
-    );
+    // Retrieve similar branches for enriched summary (use conclusions/query)
+    let searchResult: any[] = [];
+    try {
+      searchResult = await honchoFetch(
+        `/workspaces/${HONCHO_WORKSPACE}/conclusions/query`,
+        { method: 'POST', body: JSON.stringify({ 
+          query: 'branch observations tree merge',
+          top_k: 5,
+          filters: { level: 'inductive' }
+        }) }
+      );
+    } catch (e: any) {
+      if (e.message?.includes('404')) {
+        console.log('[Honcho] conclusions/query 404, using local cache');
+      }
+    }
 
     let finalSummary = branchSummary;
     if (searchResult && searchResult.length > 0) {
@@ -1139,13 +1159,20 @@ export default function (pi: ExtensionAPI) {
         await flushMessages();
         return { content: [{ type: "text", text: `Branch ${params.branch_id} stored` }] };
       } else {
-        // Retrieve
-        const result = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/documents/search`, {
-          method: 'POST',
-          body: JSON.stringify({ query: params.query || 'branch', metadata_filter: { branch_id: params.branch_id }, limit: 10 })
-        });
-        const summaries = result.map((d: any) => d.content.substring(0, 200)).join('\n');
-        return { content: [{ type: "text", text: summaries || 'No branch data' }] };
+        // Retrieve - use conclusions/query endpoint
+        try {
+          const result = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/conclusions/query`, {
+            method: 'POST',
+            body: JSON.stringify({ query: params.query || 'branch', top_k: 10, filters: { branch_id: params.branch_id } })
+          });
+          const summaries = result.map((d: any) => d.content.substring(0, 200)).join('\n');
+          return { content: [{ type: "text", text: summaries || 'No branch data' }] };
+        } catch (e: any) {
+          if (e.message?.includes('404')) {
+            return { content: [{ type: "text", text: "Honcho API not ready (404). Start service or check URL." }] };
+          }
+          throw e;
+        }
       }
     },
   });
@@ -1338,13 +1365,14 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       try {
-        const url = `/workspaces/${HONCHO_WORKSPACE}/documents/search`;
+        // Use conclusions/query endpoint (documents/search is 404)
+        const url = `/workspaces/${HONCHO_WORKSPACE}/conclusions/query`;
         
         const body: any = {
           query: params.query,
-          limit: params.limit || 5,
+          top_k: params.limit || 5,
         };
-        if (params.level) body.level = params.level;
+        if (params.level) body.filters = { level: params.level };
         
         const result = await honchoFetch(url, {
           method: "POST",
