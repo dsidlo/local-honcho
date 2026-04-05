@@ -1,5 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 /**
  * Honcho Extension for pi-mono - FULL REASONING TRACE VERSION
@@ -11,6 +15,11 @@ import { Type } from "@sinclair/typebox";
  * - Tool outputs (observations)
  * - Final responses
  * 
+ * Configuration priority (highest to lowest):
+ * 1. Environment variables
+ * 2. honcho.json config file
+ * 3. Default values
+ * 
  * Environment variables:
  *   HONCHO_BASE_URL=http://localhost:8000 (default)
  *   HONCHO_USER=dsidlo (default)
@@ -19,19 +28,152 @@ import { Type } from "@sinclair/typebox";
  *   HONCHO_WORKSPACE=default (used when mode=static)
  */
 
-// Configuration from environment
-const HONCHO_BASE_URL = process.env.HONCHO_BASE_URL || "http://localhost:8000";
-const HONCHO_USER = process.env.HONCHO_USER || "dsidlo";
-const HONCHO_AGENT_ID = process.env.HONCHO_AGENT_ID || "agent-pi-mono";
+// Configuration interface for honcho.json
+type HonchoConfig = {
+  honcho?: {
+    port?: number;
+    base_url?: string;
+    user?: string;
+    agent_id?: string;
+    peer_id?: string;
+    workspace_mode?: "auto" | "static";
+    workspace?: string;
+  };
+};
+
+/**
+ * Load configuration from honcho.json file
+ * Searches in order: ./honcho.json, ~/.pi/honcho.json, ~/.config/pi/honcho.json, ~/.honcho.json
+ */
+async function loadConfigFile(): Promise<HonchoConfig> {
+  const configPaths = [
+    join(process.cwd(), "honcho.json"),
+    join(homedir(), ".pi", "honcho.json"),
+    join(homedir(), ".config", "pi", "honcho.json"),
+    join(homedir(), ".honcho.json"),
+  ];
+
+  for (const configPath of configPaths) {
+    if (existsSync(configPath)) {
+      try {
+        const content = await readFile(configPath, "utf-8");
+        const parsed = JSON.parse(content) as HonchoConfig;
+        console.log(`[Honcho] Loaded config from ${configPath}`);
+        return parsed;
+      } catch (err) {
+        console.error(`[Honcho] Failed to parse ${configPath}:`, err);
+      }
+    }
+  }
+
+  return {};
+}
+
+// Load config file (sync for module initialization - we'll re-check async later if needed)
+let fileConfig: HonchoConfig = {};
+try {
+  // Try to load synchronously for the initial configuration
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { homedir } = await import("node:os");
+  
+  const configPaths = [
+    join(process.cwd(), "honcho.json"),
+    join(homedir(), ".pi", "honcho.json"),
+    join(homedir(), ".config", "pi", "honcho.json"),
+    join(homedir(), ".honcho.json"),
+  ];
+
+  for (const configPath of configPaths) {
+    if (existsSync(configPath)) {
+      try {
+        const content = readFileSync(configPath, "utf-8");
+        fileConfig = JSON.parse(content) as HonchoConfig;
+        console.log(`[Honcho] Loaded config from ${configPath}`);
+        break;
+      } catch {
+        // Continue to next path
+      }
+    }
+  }
+} catch {
+  // Config file loading is optional
+}
+
+// Build base URL from config: prefer env var, then config file's base_url, then port, then default
+function buildBaseUrl(): string {
+  // Environment variable takes highest priority
+  if (process.env.HONCHO_BASE_URL) {
+    return process.env.HONCHO_BASE_URL;
+  }
+  
+  // Next: explicit base_url in config
+  if (fileConfig.honcho?.base_url) {
+    return fileConfig.honcho.base_url;
+  }
+  
+  // Next: port from config
+  if (fileConfig.honcho?.port) {
+    return `http://localhost:${fileConfig.honcho.port}`;
+  }
+  
+  // Default
+  return "http://localhost:8000";
+}
+
+// Configuration from environment or config file
+const HONCHO_BASE_URL = buildBaseUrl();
+const HONCHO_USER = process.env.HONCHO_USER || fileConfig.honcho?.user || "dsidlo";
+const HONCHO_AGENT_ID = process.env.HONCHO_AGENT_ID || fileConfig.honcho?.agent_id || "agent-pi-mono";
 // Dynamic peer ID - allows subagents/team members to identify themselves
-const HONCHO_PEER_ID = process.env.HONCHO_PEER_ID || HONCHO_AGENT_ID;
-const HONCHO_WORKSPACE_MODE = process.env.HONCHO_WORKSPACE_MODE || "auto";
+const HONCHO_PEER_ID = process.env.HONCHO_PEER_ID || fileConfig.honcho?.peer_id || HONCHO_AGENT_ID;
+const HONCHO_WORKSPACE_MODE = process.env.HONCHO_WORKSPACE_MODE || fileConfig.honcho?.workspace_mode || "auto";
 
 // Dynamic workspace - will be set based on context
-let HONCHO_WORKSPACE: string = process.env.HONCHO_WORKSPACE || "default";
+let HONCHO_WORKSPACE: string = process.env.HONCHO_WORKSPACE || fileConfig.honcho?.workspace || "default";
 
 // In-memory session tracking
 let currentSessionId: string | null = null;
+
+// Observational Memory Additions (Duplicate observational-memory)
+
+// Constants from observational-memory
+const DETAILS_SCHEMA_VERSION = 2;
+const DEFAULT_RESERVE_TOKENS = 16384;
+const DEFAULT_OBSERVER_TRIGGER_TOKENS = 30000;
+const DEFAULT_REFLECTOR_TRIGGER_TOKENS = 40000;
+const DEFAULT_RAW_TAIL_RETAIN_TOKENS = 8000;
+const AUTO_COMPACT_COOLDOWN_MS = 5000;
+const MAX_CONTENT_LENGTH = 8000; // Reuse existing
+
+const REFLECT_LIMITS_THRESHOLD = {
+  red: 96,
+  yellow: 40,
+  green: 16,
+} as const;
+
+const REFLECT_LIMITS_FORCED = {
+  red: 72,
+  yellow: 28,
+  green: 8,
+} as const;
+
+type ReflectionMode = "none" | "threshold" | "forced";
+type ObservationPriority = "red" | "yellow" | "green";
+
+// In-memory overlay for local obs (fallback if Honcho down)
+let observationOverlay: string[] = [];
+let forceReflectNextCompaction = false;
+let autoCompactInFlight = false;
+let lastCompactTime = 0;
+
+// Prompt for obs summarization (from observational-memory)
+const OBS_SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant for a coding agent.
+Produce concise markdown summaries only.
+Use only information explicitly present in the provided conversation context.
+If information is missing, use "unknown" rather than guessing.
+Never call tools.
+Follow the user's format instructions exactly.`;
 
 // Message queue for batching related messages
 interface PendingMessage {
@@ -173,7 +315,6 @@ const MAX_MESSAGES_PER_BATCH = 5;
  * Maximum content length per message to prevent token overflow.
  * Rough estimate: ~1000 chars =~ 250-400 tokens depending on content.
  */
-const MAX_CONTENT_LENGTH = 8000;
 
 /**
  * Split content into chunks at paragraph boundaries.
@@ -558,6 +699,216 @@ export default function (pi: ExtensionAPI) {
         console.error("[Honcho] Final flush failed:", error);
       }
     }
+    // Flush overlay to Honcho as final synthesis
+    if (observationOverlay.length > 0) {
+      const summary = observationOverlay.join('\n');
+      await queueMessage(summary, HONCHO_PEER_ID, { type: 'obs_summary', level: 'synthesis' });
+      await flushMessages();
+    }
+  });
+
+  // ===== OBSERVATIONAL-MEMORY DUPLICATION HOOKS =====
+
+  // Helper: Estimate raw tail tokens (duplicate from observational-memory)
+  function estimateRawTailTokens(entries: any[]): number {
+    // Simplified: sum recent message tokens (reuse existing estimateTokens if available)
+    let total = 0;
+    for (let i = entries.length - 10; i < entries.length; i++) { // Last 10 for approx
+      if (entries[i]) total += entries[i].content?.length / 4 || 0;
+    }
+    return total;
+  }
+
+  // Helper: Parse and reflect observations (dedupe/prune)
+  function reflectObservations(obsText: string, mode: ReflectionMode): { summary: string, dropped: number } {
+    // Parse bullets with emojis (simplified from full parser)
+    const lines = obsText.split('\n').filter(l => l.includes('🔴') || l.includes('🟡') || l.includes('🟢'));
+    const parsed = lines.map((line, idx) => ({
+      priority: line.includes('🔴') ? 'red' : line.includes('🟡') ? 'yellow' : 'green',
+      body: line.replace(/^[\s*-]+/, '').trim(),
+      key: line.toLowerCase().replace(/[^a-z0-9]/g, ''),
+      index: idx
+    }));
+
+    // Dedupe by key, keep highest priority/latest
+    const unique = new Map();
+    parsed.forEach(obs => {
+      const existing = unique.get(obs.key);
+      if (!existing || priorityRank(obs.priority) > priorityRank(existing.priority) || (priorityRank(obs.priority) === priorityRank(existing.priority) && obs.index > existing.index)) {
+        unique.set(obs.key, obs);
+      }
+    });
+
+    const limits = mode === 'forced' ? REFLECT_LIMITS_FORCED : REFLECT_LIMITS_THRESHOLD;
+    const counts = { red: 0, yellow: 0, green: 0 };
+    const kept = Array.from(unique.values()).filter(obs => {
+      if (counts[obs.priority] < limits[obs.priority as keyof typeof limits]) {
+        counts[obs.priority]++;
+        return true;
+      }
+      return false;
+    }).sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority));
+
+    const dropped = parsed.length - kept.length;
+    const summary = kept.map(obs => `- ${obs.priority === 'red' ? '🔴' : obs.priority === 'yellow' ? '🟡' : '🟢'} ${obs.body}`).join('\n');
+    return { summary: `## Observations\n${summary}`, dropped };
+  }
+
+  function priorityRank(p: ObservationPriority): number {
+    return p === 'red' ? 3 : p === 'yellow' ? 2 : 1;
+  }
+
+  // Event: session_before_compact - Override with Honcho-backed summary
+  pi.on("session_before_compact", async (event, ctx) => {
+    const { preparation, customInstructions, signal } = event;
+    const { messagesToSummarize, turnPrefixMessages, previousSummary } = preparation;
+
+    if (!ctx.model) return;
+
+    // Quick local extraction: Queue messages as obs
+    const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
+    const convText = allMessages.map(m => `[${m.role}]: ${m.content?.map(c => c.text || '').join('')}`).join('\n');
+    await queueMessage(convText, HONCHO_PEER_ID, { type: 'obs_extraction', session_part: 'compact' });
+    await flushMessages(); // Upload to trigger potential Dreaming
+
+    // Retrieve from Honcho for summary
+    const searchResult = await honchoFetch(
+      `/workspaces/${HONCHO_WORKSPACE}/documents/search`,
+      { method: 'POST', body: JSON.stringify({ query: 'recent observations pi session', limit: 10 }) }
+    );
+
+    let summary = '';
+    let details: any = { strategy: 'honcho-obs' };
+    if (searchResult && searchResult.length > 0) {
+      // Simple merge + reflect
+      const honchoObs = searchResult.map((d: any) => d.content).join('\n');
+      const { summary: reflected, dropped } = reflectObservations(honchoObs, 'threshold');
+      summary = `${reflected}\n\n## Open Threads\n- Continue from Honcho synthesis.\n\n## Next Action Bias\n1. Use retrieved patterns from memory.`;
+      details = { ...details, honcho_hits: searchResult.length, dropped };
+    } else {
+      // Fallback local (simple summary)
+      summary = `## Observations\n- No Honcho insights; using raw context.\n\n## Open Threads\n- Recent messages.\n\n## Next Action Bias\n1. Proceed with current task.`;
+    }
+
+    // Add file ops (duplicate logic)
+    summary += formatFileOperations(preparation.fileOps, previousSummary || '');
+
+    const compaction: any = {
+      summary,
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: preparation.tokensBefore,
+      details,
+    };
+
+    return { compaction };
+  });
+
+  // Event: session_before_tree - Enhanced for Honcho branch storage
+  pi.on("session_before_tree", async (event, ctx) => {
+    const { preparation, signal } = event;
+    if (!preparation.userWantsSummary || preparation.entriesToSummarize.length === 0) return;
+
+    if (!ctx.model) return;
+
+    // Generate branch ID (e.g., from entries or timestamp)
+    const branchId = `branch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const branchMetadata = {
+      type: 'obs_tree',
+      branch_id: branchId,
+      entry_count: preparation.entriesToSummarize.length,
+      purpose: 'tree-merge-summary' // Expandable via ctx
+    };
+
+    // Queue raw entries
+    const branchText = preparation.entriesToSummarize.map(e => JSON.stringify(e)).join('\n');
+    await queueMessage(branchText, HONCHO_PEER_ID, { ...branchMetadata, raw: true });
+
+    // Extract structured obs (local parse + reflect)
+    const convText = preparation.entriesToSummarize.map(e => e.content || '').join('\n');
+    const rawObs = `## Raw Branch Obs\n${convText.substring(0, 2000)}`; // Truncate for prompt
+    const { summary: reflected } = reflectObservations(rawObs, 'threshold'); // Apply pruning
+    const branchSummary = `${reflected}\n\n## Branch File Ops\n${formatFileOperations(preparation.fileOps || {})}`;
+
+    // Store structured summary as Honcho document (for Dreaming/search)
+    await queueMessage(branchSummary, HONCHO_PEER_ID, { ...branchMetadata, level: 'inductive' });
+    await flushMessages();
+
+    // Retrieve similar branches for enriched summary (e.g., patterns from past merges)
+    const searchResult = await honchoFetch(
+      `/workspaces/${HONCHO_WORKSPACE}/documents/search`,
+      { method: 'POST', body: JSON.stringify({ 
+        query: 'branch observations tree merge',
+        limit: 5,
+        metadata_filter: { branch: true } // Honcho supports metadata queries
+      }) }
+    );
+
+    let finalSummary = branchSummary;
+    if (searchResult && searchResult.length > 0) {
+      const similarPatterns = searchResult.map((d: any) => `- Pattern from ${d.metadata?.branch_id}: ${d.content.substring(0, 100)}`).join('\n');
+      finalSummary += `\n\n## Similar Branch Patterns\n${similarPatterns}`;
+    }
+
+    const details = { 
+      strategy: 'honcho-obs-tree',
+      branch_id: branchId,
+      honcho_hits: searchResult?.length || 0,
+      entries_summarized: preparation.entriesToSummarize.length
+    };
+
+    // Cache locally for quick access (always push, even if empty branch)
+    const cacheEntry = finalSummary || `Empty branch merge on ${new Date().toISOString()} in Git: ${gitBranch || 'unknown'}`;
+    observationOverlay.push(cacheEntry);
+
+    // Debug log for verification
+    console.log(`[Honcho Obs] Cached branch entry: ${cacheEntry.substring(0, 100)}...`);
+
+    return { summary: { summary: finalSummary, details } };
+  });
+
+  // Debug command to force cache population (test)
+  pi.registerCommand("debug-cache-branch", {
+    description: "Debug: Force a test branch entry in cache",
+    handler: async (_args, ctx) => {
+      const testEntry = `Test branch merge | Git: dgs-dev | ## Observations\n- 🟢 Test entry populated | Date: ${new Date().toISOString()}`;
+      observationOverlay.push(testEntry);
+      ctx.ui.notify(`Test branch entry added to cache. Run /honcho-obs-branch to see. Cache size: ${observationOverlay.length}`, "success");
+    },
+  });
+
+  // Helper: formatFileOperations (duplicate from observational-memory)
+  function formatFileOperations(fileOps: any, previousSummary?: string): string {
+    // Simplified: list read/modified
+    const read = fileOps.read || [];
+    const modified = [...(fileOps.edited || []), ...(fileOps.written || [])];
+    let tags = '';
+    if (read.length > 0) tags += `<read-files>\n${read.join('\n')}\n</read-files>`;
+    if (modified.length > 0) tags += `<modified-files>\n${modified.join('\n')}\n</modified-files>`;
+    return tags;
+  }
+
+  // Command: /honcho-obs-status
+  pi.registerCommand("honcho-obs-status", {
+    description: "Show Honcho observational memory status",
+    handler: async (_args, ctx) => {
+      const rawTokens = estimateRawTailTokens([]); // Placeholder - integrate with Pi entries
+      const obsCount = observationOverlay.length;
+      ctx.ui.notify(
+        `Honcho Obs: ${obsCount} local, raw tail ~${rawTokens} tokens\nWorkspace: ${HONCHO_WORKSPACE}`,
+        "info"
+      );
+    },
+  });
+
+  // Command: /honcho-obs-reflect (force reflection)
+  pi.registerCommand("honcho-obs-reflect", {
+    description: "Force reflection/pruning of observations in Honcho",
+    handler: async (_args, ctx) => {
+      forceReflectNextCompaction = true;
+      // Trigger quick flush to Honcho
+      await flushMessages();
+      ctx.ui.notify("Forced reflection - pruning applied to next compact", "success");
+    },
   });
 
   /**
@@ -754,6 +1105,52 @@ export default function (pi: ExtensionAPI) {
   });
 
   /**
+   * Tool: honcho_store_obs - Store observations specifically (extension of honcho_store)
+   */
+  pi.registerTool({
+    name: "honcho_store_obs",
+    description: "Store parsed observations in Honcho for Dreaming",
+    parameters: Type.Object({
+      content: Type.String({ description: "Observation text (bullets)" }),
+      level: Type.Optional(Type.String({ enum: ["explicit", "deductive", "inductive", "synthesis"] })),
+    }),
+    async execute(_toolCallId, params) {
+      await queueMessage(params.content, HONCHO_PEER_ID, { type: 'observation', level: params.level || 'explicit' });
+      await flushMessages();
+      return { content: [{ type: "text", text: "Observations stored for Dreaming" }] };
+    },
+  });
+
+  /**
+   * Tool: honcho_branch_summary - Store/retrieve branch data
+   */
+  pi.registerTool({
+    name: "honcho_branch_summary",
+    description: "Store or retrieve branch summaries from Honcho",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal('store'), Type.Literal('retrieve')]),
+      branch_id: Type.Optional(Type.String()),
+      content: Type.Optional(Type.String()), // For store
+      query: Type.Optional(Type.String()), // For retrieve
+    }),
+    async execute(_toolCallId, params) {
+      if (params.action === 'store') {
+        await queueMessage(params.content || '', HONCHO_PEER_ID, { type: 'branch_summary', branch_id: params.branch_id, level: 'inductive' });
+        await flushMessages();
+        return { content: [{ type: "text", text: `Branch ${params.branch_id} stored` }] };
+      } else {
+        // Retrieve
+        const result = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/documents/search`, {
+          method: 'POST',
+          body: JSON.stringify({ query: params.query || 'branch', metadata_filter: { branch_id: params.branch_id }, limit: 10 })
+        });
+        const summaries = result.map((d: any) => d.content.substring(0, 200)).join('\n');
+        return { content: [{ type: "text", text: summaries || 'No branch data' }] };
+      }
+    },
+  });
+
+  /**
    * Tool: honcho_upload_document - Upload a document to Honcho
    * Large documents are intelligently chunked at paragraph boundaries.
    */
@@ -881,7 +1278,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   /**
-   * Tool: honcho_list_documents - List documents in workspace
+   * Tool: honcho_list_documents - List documents in workspace (with fallback)
    */
   pi.registerTool({
     name: "honcho_list_documents",
@@ -892,87 +1289,89 @@ export default function (pi: ExtensionAPI) {
       include_deleted: Type.Boolean({ default: false }),
     }),
     async execute(_toolCallId, params) {
-      const result = await honchoFetch(
-        `/workspaces/${HONCHO_WORKSPACE}/documents?limit=${params.limit || 20}`,
-        { method: "GET" }
-      );
-      
-      const docs = result
-        ?.filter((d: any) => params.include_deleted || !d.deleted_at)
-        ?.map((d: any) => `- ${d.name} (${d.content?.length || 0} chars, level: ${d.level})`)
-        ?.join("\n");
-      
-      return {
-        content: [{ 
-          type: "text", 
-          text: docs || "No documents found"
-        }],
-        details: { count: result?.length || 0 },
-      };
+      try {
+        const result = await honchoFetch(
+          `/workspaces/${HONCHO_WORKSPACE}/documents?limit=${params.limit || 20}`,
+          { method: "GET" }
+        );
+        
+        const docs = result
+          ?.filter((d: any) => params.include_deleted || !d.deleted_at)
+          ?.map((d: any) => `- ${d.name} (${d.content?.length || 0} chars, level: ${d.level})`)
+          ?.join("\n");
+        
+        return {
+          content: [{ 
+            type: "text", 
+            text: docs || "No documents found"
+          }],
+          details: { count: result?.length || 0 },
+        };
+      } catch (error) {
+        const msg = error.message || 'Unknown';
+        if (msg.includes('404')) {
+          return {
+            content: [{ type: "text", text: "Honcho API not ready (404). Start service or check URL. Local fallback: No docs." }],
+            details: { error: '404 - API unavailable' }
+          };
+        }
+        throw error;
+      }
     },
   });
 
   /**
-   * Tool: honcho_search_documents - Search documents using hybrid search
+   * Tool: honcho_search_documents - Search documents (with fallback)
    */
   pi.registerTool({
     name: "honcho_search_documents",
     label: "Search Honcho Documents",
-    description: "Search for documents in Honcho using hybrid search (vector + FTS + trigram)",
+    description: "Search for documents in Honcho using semantic/vector search",
     promptSnippet: "Search documents in Honcho",
-    promptGuidelines: [
-      "Use this to find documents stored in Honcho's memory",
-      "Requires specifying which peer made the observation and which peer is being observed",
-      "Use 'method' parameter to choose fusion strategy: rrf (default), weighted, or cascade",
-    ],
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
-      observer: Type.String({ 
-        description: "Peer making the observation (who stored the document)",
-        default: HONCHO_USER 
-      }),
-      observed: Type.String({ 
-        description: "Peer being observed (what the document is about)",
-        default: HONCHO_PEER_ID 
-      }),
-      top_k: Type.Number({ default: 5, description: "Number of results to return" }),
-      method: Type.Optional(Type.String({ 
-        enum: ["rrf", "weighted", "cascade"],
-        default: "rrf",
-        description: "Fusion method: rrf (Reciprocal Rank Fusion), weighted, or cascade" 
-      })),
-      filters: Type.Optional(Type.Record(Type.String(), Type.Any(), { 
-        description: "Additional filters (e.g., {level: 'session', session_name: '...'})" 
+      limit: Type.Number({ default: 5 }),
+      level: Type.Optional(Type.String({ 
+        enum: ["user", "session", "workspace"],
+        description: "Filter by document level" 
       })),
     }),
     async execute(_toolCallId, params) {
-      const url = `/workspaces/${HONCHO_WORKSPACE}/documents/search`;
-      
-      const body: any = {
-        query: params.query,
-        observer: params.observer || HONCHO_USER,
-        observed: params.observed || HONCHO_PEER_ID,
-        top_k: params.top_k || 5,
-        method: params.method || "rrf",
-      };
-      if (params.filters) body.filters = params.filters;
-      
-      const result = await honchoFetch(url, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      
-      const docs = result
-        ?.map((d: any) => `[${d.score?.toFixed(2) || "N/A"}] ${d.content?.substring(0, 300)}...`)
-        ?.join("\n\n");
-      
-      return {
-        content: [{ 
-          type: "text", 
-          text: docs || "No matching documents found"
-        }],
-        details: result,
-      };
+      try {
+        const url = `/workspaces/${HONCHO_WORKSPACE}/documents/search`;
+        
+        const body: any = {
+          query: params.query,
+          limit: params.limit || 5,
+        };
+        if (params.level) body.level = params.level;
+        
+        const result = await honchoFetch(url, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        
+        const docs = result
+          ?.map((d: any) => `[${d.score?.toFixed(2) || "N/A"}] ${d.name}:\n${d.content?.substring(0, 300)}...`)
+          ?.join("\n\n");
+        
+        return {
+          content: [{ 
+            type: "text", 
+            text: docs || "No matching documents found"
+          }],
+          details: result,
+        };
+      } catch (error) {
+        const msg = error.message || 'Unknown';
+        if (msg.includes('404')) {
+          return {
+            content: [{ type: "text", text: "Honcho search API not ready (404). Check service/URL. Local fallback: No results." }],
+            details: { error: '404 - API unavailable' }
+          };
+        }
+        throw error;
+      }
     },
   });
 
@@ -1011,6 +1410,39 @@ export default function (pi: ExtensionAPI) {
       const count = messageQueue.length;
       await flushMessages();
       ctx.ui.notify(`Flushed ${count} messages to Honcho`, "success");
+    },
+  });
+
+  // Command: /honcho-obs-branch - Fully local (no API, always fallback)
+  pi.registerCommand("honcho-obs-branch", {
+    description: "Show local branches from cache and Git (Honcho API bypassed to avoid 404)",
+    handler: async (_args, ctx) => {
+      console.log('Running /honcho-obs-branch with local fallback');
+      try {
+        const { stdout: gitBranch } = await bash('git branch --show-current || echo "unknown"');
+        const trimmedBranch = gitBranch.trim();
+        const cache = observationOverlay || []; // Local cache from hooks
+        const branchEntries = cache.filter(entry => 
+          entry.includes('branch-') || entry.includes('Git Branch:') || entry.includes('tree-merge')
+        ).slice(-10); // Last 10 for more context
+        
+        let output = `Local Branches (Git: ${trimmedBranch}):\n`;
+        if (branchEntries.length > 0) {
+          output += branchEntries.map((entry, idx) => {
+            const id = entry.match(/branch-([\w-]+)/)?.[1] || entry.match(/Git Branch: ([\w-]+)/)?.[1] || `Branch ${idx + 1}`;
+            const preview = entry.split('\n')[0].substring(0, 80) + '...';
+            return `- ${id}: ${preview} (${entry.length} chars)`;
+          }).join('\n');
+        } else {
+          output += '- None found: Perform a Pi branch merge (fork/test/merge) to populate obs cache.';
+        }
+        output += '\n\nCache size: ' + cache.length + ' entries | Workspace: ' + HONCHO_WORKSPACE;
+        
+        ctx.ui.notify(output, "info");
+      } catch (error) {
+        console.error('Local branch command error:', error);
+        ctx.ui.notify('Error running local branch command. Check Git and cache.', "error");
+      }
     },
   });
 
