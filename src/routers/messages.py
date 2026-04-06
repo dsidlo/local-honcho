@@ -93,21 +93,34 @@ async def create_messages_for_session(
 ):
     """Add new message(s) to a session."""
     try:
+        # Filter out blank messages - skip insertion
+        non_blank_messages = [
+            m for m in messages.messages if m.content and m.content.strip()
+        ]
+        skipped_count = len(messages.messages) - len(non_blank_messages)
+        if skipped_count > 0:
+            logger.warning(
+                f"Skipped {skipped_count} blank messages for session {session_id} - no record inserted"
+            )
+        
+        if not non_blank_messages:
+            return []  # No messages to create
+        
         created_messages = await crud.create_messages(
             db,
-            messages=messages.messages,
+            messages=non_blank_messages,
             workspace_name=workspace_id,
             session_name=session_id,
         )
 
-        # Prometheus metrics
+        # Prometheus metrics (use actual created count)
         if settings.METRICS.ENABLED:
             prometheus_metrics.record_messages_created(
                 count=len(created_messages),
                 workspace_name=workspace_id,
             )
 
-        # Enqueue for processing (existing logic)
+        # Enqueue for processing (only non-blank)
         payloads = [
             {
                 "workspace_name": workspace_id,
@@ -121,7 +134,7 @@ async def create_messages_for_session(
                 "configuration": original.configuration,
             }
             for message, original in zip(
-                created_messages, messages.messages, strict=True
+                created_messages, non_blank_messages, strict=True
             )
         ]
 
@@ -143,70 +156,73 @@ async def create_messages_with_file(
     file: UploadFile = File(...),
     db: AsyncSession = db,
 ):
-    """Create messages from uploaded files. Files are converted to text and split into multiple messages."""
+    """Add new message(s) to a session with file upload."""
+    try:
+        # Validate file size
+        if file.size and file.size > settings.MAX_FILE_SIZE:
+            raise FileTooLargeError(
+                f"File size ({file.size} bytes) exceeds maximum allowed size ({settings.MAX_FILE_SIZE} bytes)",
+            )
 
-    # Validate file size
-    if file.size and file.size > settings.MAX_FILE_SIZE:
-        raise FileTooLargeError(
-            f"File size ({file.size} bytes) exceeds maximum allowed size ({settings.MAX_FILE_SIZE} bytes)",
+        # Process files using shared utility function
+        all_message_data = await process_file_uploads_for_messages(
+            file=file,
+            peer_id=form_data.peer_id,
+            metadata=form_data.metadata,
+            configuration=form_data.configuration,
+            created_at=form_data.created_at,
         )
 
-    # Process files using shared utility function
-    all_message_data = await process_file_uploads_for_messages(
-        file=file,
-        peer_id=form_data.peer_id,
-        metadata=form_data.metadata,
-        configuration=form_data.configuration,
-        created_at=form_data.created_at,
-    )
-
-    # Create messages
-    message_creates = [item["message_create"] for item in all_message_data]
-    created_messages = await crud.create_messages(
-        db,
-        messages=message_creates,
-        workspace_name=workspace_id,
-        session_name=session_id,
-    )
-
-    # Update internal_metadata for file-related messages
-    for i, message in enumerate(created_messages):
-        file_metadata = all_message_data[i]["file_metadata"]
-        message.internal_metadata.update(file_metadata)
-        flag_modified(message, "internal_metadata")
-
-    await db.commit()
-
-    # Enqueue for processing (same as regular messages)
-    payloads = [
-        {
-            "workspace_name": workspace_id,
-            "session_name": session_id,
-            "message_id": message.id,
-            "content": message.content,
-            "peer_name": message.peer_name,
-            "created_at": message.created_at,
-            "message_public_id": message.public_id,
-            "seq_in_session": message.seq_in_session,
-            "configuration": form_data.configuration,
-        }
-        for message in created_messages
-    ]
-
-    background_tasks.add_task(enqueue, payloads)
-    logger.debug(
-        "Batch of %s messages created from file uploads and queued for processing",
-        len(created_messages),
-    )
-
-    # Prometheus metrics
-    if settings.METRICS.ENABLED:
-        prometheus_metrics.record_messages_created(
-            count=len(created_messages),
+        # Create messages
+        message_creates = [data["message_create"] for data in all_message_data]
+        created_messages = await crud.create_messages(
+            db,
+            messages=message_creates,
             workspace_name=workspace_id,
+            session_name=session_id,
         )
 
-    return created_messages
+        # Update internal_metadata for file-related messages (match indices)
+        for i, message in enumerate(created_messages):
+            file_metadata = all_message_data[i]["file_metadata"]
+            message.internal_metadata.update(file_metadata)
+            flag_modified(message, "internal_metadata")
+
+        await db.commit()
+
+        # Enqueue for processing (same as regular messages)
+        payloads = [
+            {
+                "workspace_name": workspace_id,
+                "session_name": session_id,
+                "message_id": message.id,
+                "content": message.content,
+                "peer_name": message.peer_name,
+                "created_at": message.created_at,
+                "message_public_id": message.public_id,
+                "seq_in_session": message.seq_in_session,
+                "configuration": form_data.configuration,
+            }
+            for message in created_messages
+        ]
+
+        background_tasks.add_task(enqueue, payloads)
+        logger.debug(
+            "Batch of %s messages created from file uploads and queued for processing",
+            len(created_messages),
+        )
+
+        # Prometheus metrics
+        if settings.METRICS.ENABLED:
+            prometheus_metrics.record_messages_created(
+                count=len(created_messages),
+                workspace_name=workspace_id,
+            )
+
+        return created_messages
+    except ValueError as e:
+        logger.warning(f"Failed to create messages with file for session {session_id}: {str(e)}")
+        raise
 
 
 @router.post("/list", response_model=Page[schemas.Message])

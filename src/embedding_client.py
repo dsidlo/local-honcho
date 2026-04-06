@@ -232,28 +232,22 @@ class _EmbeddingClient:
         if not id_resource_dict:
             return {}
 
-        logger.info(f"[BATCH-EMBED] Processing {len(id_resource_dict)} items")
+        logger.info(f"[BATCH-EMBED] Processing {len(id_resource_dict)} items ({self.provider}: {'sequential' if self.provider == 'ollama' else 'batched'})")
 
-        # 1. Prepare chunks for all texts if needed
-        text_chunks = self._prepare_chunks(id_resource_dict)
-        total_chunks = sum(len(chunks) for chunks in text_chunks.values())
-        
-        # 2. Create batches that fit API limits (max 2048 embeddings per request, max 300,000 tokens per request)
-        batches = self._create_batches(text_chunks)
-        
-        # 3. Process all batches concurrently
-        batch_results = await asyncio.gather(
-            *[self._process_batch(batch) for batch in batches],
-        )
-        
-        # 4. Accumulate results preserving chunk order
-        results: dict[str, list[list[float]]] = defaultdict(list)
-        for batch in batch_results:
-            for text_id, embedding in batch.items():
-                results[text_id].append(embedding)
+        # For Ollama, process all texts sequentially without batching
+        results = {}
+        for text_id, (text, tokens) in id_resource_dict.items():
+            if len(tokens) > self.max_embedding_tokens:
+                logger.warning(f"Text {text_id} exceeds token limit, truncating")
+                # Truncate text to fit
+                truncated_tokens = tokens[:self.max_embedding_tokens]
+                text = self.encoding.decode(truncated_tokens)
+            # Embed full (or truncated) text
+            embedding = await self.embed(text)
+            results[text_id] = [embedding]
 
         logger.info(f"[BATCH-EMBED] Done - returned embeddings for {len(results)} texts")
-        return dict(results)
+        return results
 
     def _prepare_chunks(
         self, id_resource_dict: dict[str, tuple[str, list[int]]]
@@ -366,7 +360,7 @@ class _EmbeddingClient:
             }
         
         elif isinstance(self.client, httpx.AsyncClient):
-            # Ollama: embed one at a time
+            # Ollama: no batching, process one at a time sequentially
             results = {}
             for item in batch:
                 response = await self.client.post(

@@ -215,6 +215,12 @@ class Message(Base):
     # We have since assigned all of these messages to a default session.
     session_name: Mapped[str] = mapped_column(TEXT, nullable=False)
     content: Mapped[str] = mapped_column(TEXT)
+    content_tsv: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', coalesce(content, ''))", persisted=True),
+        nullable=True,
+    )
+    embedding: MappedColumn[Any] = mapped_column(Vector(1536), nullable=True)
     h_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, default=dict, server_default=text("'{}'::jsonb")
     )
@@ -258,11 +264,19 @@ class Message(Base):
             "session_name",
             "seq_in_session",
         ),
-        # Full text search index on content column
+        # Full text search GIN index on content_tsv
         Index(
             "ix_messages_content_gin",
-            text("to_tsvector('english', content)"),
+            "content_tsv",
             postgresql_using="gin",
+        ),
+        # HNSW index on embedding for vector search
+        Index(
+            "ix_messages_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )
 
