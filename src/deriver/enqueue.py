@@ -237,6 +237,12 @@ def create_summary_record(
     if not isinstance(message_id, int):
         raise ValueError("message_id is required and must be an integer")
 
+    # Fix for None observer/observed
+    if message.get('observer') is None:
+        message['observer'] = 'session'
+    if message.get('observed') is None:
+        message['observed'] = message.get('peer_name', 'unknown')
+
     processed_payload = create_payload(
         message=message,
         configuration=configuration,
@@ -330,14 +336,23 @@ async def generate_queue_records(
         message_seq_in_session % conf.summary.messages_per_short_summary == 0
         or message_seq_in_session % conf.summary.messages_per_long_summary == 0
     ):
+        # Ultra-fix: force observer/observed to 'dsidlo' or session
+        effective_observer = message.get('peer_name', 'dsidlo')
+        effective_observed = message.get('peer_name', 'dsidlo')
+        message_copy = message.copy()
+        message_copy['observer'] = effective_observer
+        message_copy['observed'] = effective_observed
         records.append(
             create_summary_record(
-                message,
+                message_copy,
                 configuration=conf,
                 session_id=session_id,
                 message_seq_in_session=message_seq_in_session,
             )
         )
+        logger.info(f"Enqueued summary for message {message_id} with observer {effective_observer}")
+        logger.info(f"Enqueued summary for message {message_id} with observer {effective_observer}")
+
 
     # Check if the sender should be observed based on peer configuration
     should_observe = get_effective_observe_me(observed, peers_with_configuration)
@@ -381,6 +396,28 @@ async def generate_queue_records(
                 session_id=session_id,
             )
         )
+
+    # Summary enqueue with observer check
+    if conf.summary.enabled and (
+        message_seq_in_session % conf.summary.messages_per_short_summary == 0
+        or message_seq_in_session % conf.summary.messages_per_long_summary == 0
+    ):
+        # Default observer to observed or 'session' if no observers
+        effective_observer = observed
+        message_copy = message.copy()
+        message_copy['observer'] = effective_observer
+        if 'observed' not in message_copy or message_copy['observed'] is None:
+            message_copy['observed'] = effective_observer
+        records.append(
+            create_summary_record(
+                message_copy,
+                configuration=conf,
+                session_id=session_id,
+                message_seq_in_session=message_seq_in_session,
+            )
+        )
+        logger.info(f"Enqueued summary for message {message_id} with observer {effective_observer}")
+
 
     logger.debug(
         "message %s from %s created %s queue items with %s observers",

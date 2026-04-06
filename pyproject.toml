@@ -59,6 +59,10 @@ dev = [
     "boto3>=1.42.5",
     "pytest-xdist>=3.8.0",
     "pytest-forked>=1.6.0",
+    "asyncpg>=0.31.0",
+    "pytest-mock>=3.15.1",
+    "sentry-sdk>=2.53.0",
+    "psycopg2-binary>=2.9.11",
 ]
 
 [tool.uv.workspace]

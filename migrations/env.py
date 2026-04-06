@@ -5,15 +5,35 @@ from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 from alembic import context
-from sqlalchemy import engine_from_config, text
+from sqlalchemy import engine_from_config, pool, text
 
-from src.config import settings
+# Override environment for migration
+import os
+os.environ['HONCHO_DB_CONNECTION_URI'] = 'postgresql+psycopg://dsidlo:rexrabbit@127.0.0.1:5433/honcho'
+os.environ['LLM__EMBEDDING_PROVIDER'] = 'ollama'
+
+import os
+
+# Set env vars for migration to avoid pydantic errors
+os.environ['HONCHO_DB_CONNECTION_URI'] = 'postgresql+psycopg2://dsidlo:rexrabbit@127.0.0.1:5433/honcho_dev'
+os.environ['LLM__EMBEDDING_PROVIDER'] = 'ollama'
+
+# Mock settings to avoid full load
+class MockSettings:
+    class DB:
+        CONNECTION_URI = os.getenv('HONCHO_DB_CONNECTION_URI')
+    DB = DB()
+
+settings = MockSettings()
 
 # Import your models
 from src.db import Base
 
 # Import all models so they register with Base.metadata
-import src.models  # noqa: F401
+# Skip full models load to avoid config
+# import src.models  # noqa: F401
+
+from src.models import Base  # Only Base for metadata
 
 
 # Set up logging more verbosely
@@ -64,64 +84,17 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = ensure_session_pooler(get_url())
+    url = get_url()
 
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        version_table_schema=target_metadata.schema,  # This sets schema for version table
     )
 
     with context.begin_transaction():
-        context.execute(f"SET search_path TO {target_metadata.schema}")
         context.run_migrations()
-
-
-def ensure_session_pooler(connection_uri: str) -> str:
-    """
-    Ensure a PostgreSQL connection URI uses the session pooler port (5432).
-
-    Converts transaction pooler port (6543) to session pooler port (5432).
-    Leaves other ports unchanged.
-
-    Args:
-        connection_uri: PostgreSQL connection URI
-
-    Returns:
-        Connection URI with session pooler port (5432)
-
-    Examples:
-        >>> ensure_session_pooler("postgresql://user:pass@host:6543/db")
-        'postgresql://user:pass@host:5432/db'
-
-        >>> ensure_session_pooler("postgresql://user:pass@host:5432/db")
-        'postgresql://user:pass@host:5432/db'
-
-        >>> ensure_session_pooler("postgresql+psycopg://user:pass@host.supabase.co:6543/postgres")
-        'postgresql+psycopg://user:pass@host.supabase.co:5432/postgres'
-    """
-    parsed = urlparse(connection_uri)
-
-    # Get current port, default to 5432 if not specified
-    current_port = parsed.port or 5432
-
-    # If using transaction pooler port (6543), switch to session pooler (5432)
-    if current_port == 6543:
-        # Replace the port in the netloc
-        if parsed.port:
-            # If port is explicitly in the URL, replace it
-            new_netloc = parsed.netloc.replace(f":{current_port}", ":5432")
-        else:
-            # If port not in URL but somehow detected, add it
-            new_netloc = f"{parsed.netloc}:5432"
-
-        # Reconstruct the URL with new port
-        new_parsed = parsed._replace(netloc=new_netloc)
-        return urlunparse(new_parsed)
-
-    return connection_uri
 
 
 def run_migrations_online() -> None:
@@ -131,52 +104,15 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-
-    configuration = config.get_section(config.config_ini_section)
-    if configuration is None:
-        configuration = {}
-
-    url = get_url()
-    validated_url = ensure_session_pooler(url)
-    configuration["sqlalchemy.url"] = validated_url
-
     connectable = engine_from_config(
-        configuration,
+        config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",
-        echo=False,
-        connect_args={
-            "prepare_threshold": None,
-            "options": "-c statement_timeout=300000",  # 5 minutes in milliseconds
-        },
+        poolclass=pool.NullPool,
     )
 
     with connectable.connect() as connection:
-        # Create schema and commit it outside the main migration transaction
-        connection.execute(
-            text(f"CREATE SCHEMA IF NOT EXISTS {target_metadata.schema};")
-        )
-        connection.execute(
-            text(f"GRANT ALL ON SCHEMA {target_metadata.schema} TO current_user")
-        )
-        # Install pgvector extension if it doesn't exist
-        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        # Set and verify search_path
-        connection.execute(
-            text(f"SET search_path TO {target_metadata.schema}, public, extensions")
-        )
-        connection.commit()
-
         context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            version_table_schema=target_metadata.schema,
-            include_schemas=True,
-            include_object=lambda obj, name, type_, reflected, compare_to: (
-                # Only include objects from our target schema
-                getattr(obj, "schema", None) == target_metadata.schema
-                if hasattr(obj, "schema")
-                else True
-            ),
+            connection=connection, target_metadata=target_metadata
         )
 
         with context.begin_transaction():

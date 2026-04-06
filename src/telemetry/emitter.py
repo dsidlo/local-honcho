@@ -16,8 +16,8 @@ from collections import deque
 from typing import TYPE_CHECKING
 
 import httpx
-from cloudevents.conversion import to_json  # pyright: ignore[reportUnknownVariableType]
-from cloudevents.http import CloudEvent
+from cloudevents.v1.conversion import to_json  # pyright: ignore[reportUnknownVariableType]
+from cloudevents.v1.http import CloudEvent
 
 if TYPE_CHECKING:
     from src.telemetry.events.base import BaseEvent

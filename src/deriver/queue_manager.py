@@ -114,7 +114,7 @@ class QueueManager:
 
     async def initialize(self) -> None:
         """Setup signal handlers, initialize client, and start the main polling loop"""
-        logger.debug(f"Initializing QueueManager with {self.workers} workers")
+        logger.info(f"Initializing QueueManager with {self.workers} workers")
 
         # Set up signal handlers
         loop = asyncio.get_running_loop()
@@ -123,7 +123,7 @@ class QueueManager:
             loop.add_signal_handler(
                 sig, lambda s=sig: asyncio.create_task(self.shutdown(s))
             )
-        logger.debug("Signal handlers registered")
+        logger.info("Signal handlers registered")
 
         # Start the reconciler scheduler
         try:
@@ -132,7 +132,7 @@ class QueueManager:
             logger.exception("Failed to start reconciler scheduler")
 
         # Run the polling loop directly in this task
-        logger.debug("Starting polling loop directly")
+        logger.info("Starting polling loop directly")
         try:
             await self.polling_loop()
         finally:
@@ -159,7 +159,7 @@ class QueueManager:
         """Clean up owned work units"""
         total_work_units = self.get_total_owned_work_units()
         if total_work_units > 0:
-            logger.debug(f"Cleaning up {total_work_units} owned work units...")
+            logger.info(f"Cleaning up {total_work_units} owned work units...")
             try:
                 # Use the tracked_db dependency for transaction safety
                 async with tracked_db("queue_cleanup") as db:
@@ -250,6 +250,18 @@ class QueueManager:
                 .subquery()
             )
 
+            # Filter out work units where the referenced messages don't exist
+            # or are in a different session/workspace than expected.
+            # This can happen due to data inconsistency (orphaned queue items).
+            valid_messages_subq = (
+                select(models.QueueItem.work_unit_key)
+                .join(models.Message, models.QueueItem.message_id == models.Message.id)
+                .where(~models.QueueItem.processed)
+                .group_by(models.QueueItem.work_unit_key)
+                .having(func.count(models.Message.id) > 0)
+                .subquery()
+            )
+
             query = (
                 select(work_units_subq.c.work_unit_key)
                 .limit(limit)
@@ -264,6 +276,13 @@ class QueueManager:
                         == work_units_subq.c.work_unit_key
                     )
                     .exists()
+                )
+                .where(
+                    # Only include work units that have valid messages
+                    # (join with valid_messages_subq ensures data integrity)
+                    work_units_subq.c.work_unit_key.in_(
+                        select(valid_messages_subq.c.work_unit_key)
+                    )
                 )
             )
 
@@ -286,6 +305,59 @@ class QueueManager:
                 return {}
 
             claimed_mapping = await self.claim_work_units(db, available_units)
+            
+            # NEW: Filter out work units that would return 0 items from get_queue_item_batch.
+            # This can happen when queue items reference messages that don't exist
+            # in the expected session/workspace (data inconsistency).
+            if claimed_mapping:
+                filtered_mapping = {}
+                for work_unit_key, aqs_id in claimed_mapping.items():
+                    work_unit = parse_work_unit_key(work_unit_key)
+                    if work_unit.task_type == "representation":
+                        # Check if there are actually messages to process
+                        result = await db.execute(
+                            select(func.count(models.Message.id))
+                            .select_from(models.QueueItem)
+                            .join(
+                                models.Message,
+                                models.QueueItem.message_id == models.Message.id,
+                            )
+                            .where(models.QueueItem.work_unit_key == work_unit_key)
+                            .where(~models.QueueItem.processed)
+                            .where(
+                                models.Message.workspace_name == work_unit.workspace_name
+                            )
+                            .where(
+                                models.Message.session_name == work_unit.session_name
+                            )
+                        )
+                        msg_count = result.scalar()
+                        if msg_count == 0:
+                            logger.warning(
+                                f"Marked orphan as errored: {work_unit_key} - "
+                                f"no messages found in expected session/workspace "
+                                f"({work_unit.workspace_name}:{work_unit.session_name})"
+                            )
+                            # Mark all queue items for this orphan as errored
+                            await db.execute(
+                                update(models.QueueItem)
+                                .where(models.QueueItem.work_unit_key == work_unit_key)
+                                .where(~models.QueueItem.processed)
+                                .values(
+                                    processed=True,
+                                    error="Orphaned work unit: no linked messages"
+                                )
+                            )
+                            # Clean up the AQS entry for the empty work unit
+                            await db.execute(
+                                delete(models.ActiveQueueSession).where(
+                                    models.ActiveQueueSession.id == aqs_id
+                                )
+                            )
+                            continue
+                    filtered_mapping[work_unit_key] = aqs_id
+                claimed_mapping = filtered_mapping
+            
             await db.commit()
 
             return claimed_mapping
@@ -296,8 +368,76 @@ class QueueManager:
         """
         Claim work units and return a mapping of work_unit_key to aqs_id.
         Returns only the work units that were successfully claimed.
+        Filters out work units that no longer have unprocessed queue items.
         """
-        values = [{"work_unit_key": key} for key in work_unit_keys]
+        # First, filter to only work units that still have unprocessed queue items
+        # AND where the referenced messages actually exist.
+        # This prevents claiming work units that were fully processed by another worker
+        # between the time we queried for available work units and now,
+        # AND work units with orphaned queue items (data inconsistency).
+        valid_work_units_query = (
+            select(models.QueueItem.work_unit_key)
+            .join(models.Message, models.QueueItem.message_id == models.Message.id)
+            .where(
+                models.QueueItem.work_unit_key.in_(work_unit_keys),
+                ~models.QueueItem.processed,
+            )
+            .group_by(models.QueueItem.work_unit_key)
+            .having(func.count(models.QueueItem.id) > 0)
+            .having(func.count(models.Message.id) > 0)
+        )
+        result = await db.execute(valid_work_units_query)
+        valid_keys = set(result.scalars().all())
+
+        # Additional validation: filter out orphaned representation work units
+        # where messages don't exist in the expected session/workspace
+        orphaned_keys = set()
+        for key in valid_keys:
+            try:
+                work_unit = parse_work_unit_key(key)
+                if work_unit.task_type == "representation":
+                    # Check if there are messages in the expected session/workspace
+                    result = await db.execute(
+                        select(func.count(models.Message.id))
+                        .select_from(models.QueueItem)
+                        .join(models.Message, models.QueueItem.message_id == models.Message.id)
+                        .where(models.QueueItem.work_unit_key == key)
+                        .where(~models.QueueItem.processed)
+                        .where(models.Message.workspace_name == work_unit.workspace_name)
+                        .where(models.Message.session_name == work_unit.session_name)
+                    )
+                    msg_count = result.scalar()
+                    if msg_count == 0:
+                        orphaned_keys.add(key)
+                        logger.warning(
+                            f"Marked orphan as errored: {key} - no messages in expected session/workspace"
+                        )
+                        # Mark all queue items for this orphan as errored
+                        await db.execute(
+                            update(models.QueueItem)
+                            .where(models.QueueItem.work_unit_key == key)
+                            .where(~models.QueueItem.processed)
+                            .values(
+                                processed=True,
+                                error="Orphaned work unit: no linked messages"
+                            )
+                        )
+            except Exception as e:
+                logger.warning(f"Error validating work unit {key}: {e}")
+                orphaned_keys.add(key)
+        
+        valid_keys -= orphaned_keys
+
+        if len(valid_keys) < len(work_unit_keys):
+            total_filtered = len(work_unit_keys) - len(valid_keys)
+            logger.info(
+                f"Filtered out {total_filtered} work units ({len(orphaned_keys)} orphaned, {total_filtered - len(orphaned_keys)} empty)"
+            )
+
+        if not valid_keys:
+            return {}
+
+        values = [{"work_unit_key": key} for key in valid_keys]
 
         stmt = (
             insert(models.ActiveQueueSession)
@@ -311,25 +451,25 @@ class QueueManager:
         result = await db.execute(stmt)
         claimed_rows = result.all()
         claimed_mapping = {row[0]: row[1] for row in claimed_rows}
-        logger.debug(
+        logger.info(
             f"Claimed {len(claimed_mapping)} work units: {list(claimed_mapping.keys())}"
         )
         return claimed_mapping
 
     async def polling_loop(self) -> None:
         """Main polling loop to find and process new work units"""
-        logger.debug("Starting polling loop")
+        logger.info("Starting polling loop")
         try:
             while not self.shutdown_event.is_set():
                 if self.queue_empty_flag.is_set():
-                    # logger.debug("Queue empty flag set, waiting")
+                    # logger.info("Queue empty flag set, waiting")
                     await asyncio.sleep(settings.DERIVER.POLLING_SLEEP_INTERVAL_SECONDS)
                     self.queue_empty_flag.clear()
                     continue
 
                 # Check if we have capacity before querying
                 if self.semaphore.locked():
-                    # logger.debug("All workers busy, waiting")
+                    # logger.info("All workers busy, waiting")
                     await asyncio.sleep(settings.DERIVER.POLLING_SLEEP_INTERVAL_SECONDS)
                     continue
 
@@ -407,7 +547,7 @@ class QueueManager:
 
     async def process_work_unit(self, work_unit_key: str, worker_id: str) -> None:
         """Process all queue items for a specific work unit by routing to the correct handler."""
-        logger.debug(f"Starting to process work unit {work_unit_key}")
+        logger.info(f"Starting to process work unit {work_unit_key}")
         work_unit = parse_work_unit_key(work_unit_key)
         async with self.semaphore:
             queue_item_count = 0
@@ -429,11 +569,11 @@ class QueueManager:
                             ) = await self.get_queue_item_batch(
                                 work_unit.task_type, work_unit_key, ownership.aqs_id
                             )
-                            logger.debug(
+                            logger.info(
                                 f"Worker {worker_id} retrieved {len(messages_context)} messages and {len(items_to_process)} queue items for work unit {work_unit_key} (AQS ID: {ownership.aqs_id})"
                             )
                             if not items_to_process:
-                                logger.debug(
+                                logger.info(
                                     f"No more queue items to process for work unit {work_unit_key} for worker {worker_id}"
                                 )
                                 break
@@ -479,7 +619,7 @@ class QueueManager:
                                 work_unit.task_type, work_unit_key, ownership.aqs_id
                             )
                             if not queue_item:
-                                logger.debug(
+                                logger.info(
                                     f"No more queue items to process for work unit {work_unit_key} for worker {worker_id}"
                                 )
                                 break
@@ -508,7 +648,7 @@ class QueueManager:
 
                     # Check for shutdown after processing each batch
                     if self.shutdown_event.is_set():
-                        logger.debug(
+                        logger.info(
                             "Shutdown requested, stopping processing for work unit %s",
                             work_unit_key,
                         )
@@ -532,7 +672,7 @@ class QueueManager:
                             work_unit.task_type in ["representation", "summary"]
                             and work_unit.workspace_name is not None
                         ):
-                            logger.debug(
+                            logger.info(
                                 f"Publishing queue.empty event for {work_unit_key} in workspace {work_unit.workspace_name}"
                             )
                             await publish_webhook_event(
@@ -547,7 +687,7 @@ class QueueManager:
                     except Exception:
                         logger.exception("Error triggering queue_empty webhook")
                 else:
-                    logger.debug(
+                    logger.info(
                         f"Work unit {work_unit_key} already cleaned up by another worker, skipping webhook"
                     )
 
@@ -846,7 +986,7 @@ class QueueManager:
 
 
 async def main():
-    logger.debug("Starting queue manager")
+    logger.info("Starting queue manager")
 
     try:
         await init_cache()
@@ -863,4 +1003,4 @@ async def main():
         sentry_sdk.capture_exception(e)
     finally:
         await close_cache()
-        logger.debug("Main function exiting")
+        logger.info("Main function exiting")
