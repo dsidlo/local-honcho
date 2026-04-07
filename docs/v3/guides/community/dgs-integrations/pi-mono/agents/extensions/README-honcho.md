@@ -1,6 +1,14 @@
-# Honcho Extension for pi-mono - README (Updated with Observational-Memory Hooks & Vector Search Upgrade)
+# Honcho Extension for pi-mono - README 
 
-A pi-mono extension that captures the **complete ReAct cycle** for maximum Dreamer + Dialectic intelligence, with **intelligent content chunking** for large messages and documents. **Now enhanced with observational-memory hooks** for Pi session compaction/tree summarization, storing prioritized observations in Honcho for Dreaming.
+
+## Enhancements to Honcho
+
+- A pi-mono extension that captures the **complete ReAct cycle** for maximum Dreamer + Dialectic intelligence, with **intelligent content chunking** for large messages and documents. 
+- **Now enhanced with observational-memory hooks** for Pi session compaction/tree summarization, storing prioritized observations in Honcho for Dreaming.
+- **/honcho-apply-learnings** applies Synthesis Dreams to enhance appropriate agents.
+- **New Features**: pi-mono Observational-memory duplication (compaction/tree hooks), Git branch integration, local fallback for API issues
+- **Hybrid Context Search**: Vector Search + FTS + TriGram + Reranking
+  - This improves search as ollama embedding can't produce embedding for some contexts, yet data can still be found via FTS and Trigram then re-ranking filters memories to only those memories that are appropriate for the current context.
 
 ## Quick Reference
 
@@ -8,7 +16,6 @@ A pi-mono extension that captures the **complete ReAct cycle** for maximum Dream
 - **Configuration**: `~/.env`
 - **Services**: `honcho-api.service`, `honcho-deriver.service`
 - **API URL**: http://localhost:8000
-- **New Features**: Observational-memory duplication (compaction/tree hooks), Git branch integration, local fallback for API issues
 
 ---
 
