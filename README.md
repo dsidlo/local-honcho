@@ -19,7 +19,13 @@
 **Recent updates**
 - Added missing systhesis_specialist.py
 - Fixed bug with SythesisSpecialist not creating systhesis document records.
-- Hybrid Vector search, Full Text Search, Trigram Fuzzy Search with Corss-Encoder Reranking
+- Hybrid Vector search, Full Text Search, Trigram Fuzzy Search with Corss-Encoder Reranking, as ollama embeddings may not generate vectors for non-gramatical content.
+- pi-mono integrations:
+  - A pi-mono extension that captures the **complete ReAct cycle** for maximum Dreamer + Dialectic intelligence, with **intelligent content chunking** for large messages and documents. 
+  - **Now enhanced with observational-memory hooks** for Pi session compaction/tree summarization, storing prioritized observations in Honcho for Dreaming.
+  - **/honcho-apply-learnings** applies Synthesis Dreams to enhance appropriate agents.
+  - **New Features**: pi-mono Observational-memory duplication (compaction/tree hooks), Git branch integration, local fallback for API issues
+- Uses Python 3.13.12
 
 ##### A fork of [plastic-labs/Honcho](https://github.com/plastic-labs/honcho)
 
