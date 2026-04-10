@@ -26,6 +26,7 @@
   - **/honcho-apply-learnings** applies Synthesis Dreams to enhance appropriate agents.
   - **New Features**: pi-mono Observational-memory duplication (compaction/tree hooks), Git branch integration, local fallback for API issues
 - Uses Python 3.13.12
+- Improved work queue handling to eliminate queue starvation for various work unit types. Change queue processing to WRR Wighted Round Robbing + guaranteed min/max queue priority for work unit types.
 
 ##### A fork of [plastic-labs/Honcho](https://github.com/plastic-labs/honcho)
 

@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=exec
 WorkingDirectory=/home/<user>/.local/lib/honcho
-ExecStart=/home/<user>/.local/bin/uv run --no-dev fastapi dev src/main.py --host 0.0.0.0 --port 8000
+ExecStart=/home/<user>/.local/bin/uv run --no-dev fastapi dev src/main.py --host 0.0.0.0 --port 8333
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/home/<user>/.env

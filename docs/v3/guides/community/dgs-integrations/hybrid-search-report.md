@@ -1,5 +1,5 @@
 # Vector Search vs RRF Hybrid Search Comparison Report
-**Generated:** 2026-04-06 14:47:04
+**Generated:** 2026-04-08 21:40:40
 **Test Database:** honcho_dev
 
 ## Executive Summary

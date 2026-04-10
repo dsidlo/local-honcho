@@ -15,6 +15,51 @@ Running Honcho as systemd services provides:
 
 ---
 
+## Port Configuration: Development vs Production
+
+When running Honcho in a **development environment**, non-standard ports are used to avoid conflicts with production services:
+
+| Service | Dev Port | Prod Port | Notes |
+|---------|----------|-----------|-------|
+| Honcho API | **8333** | 8000 | FastAPI development server port |
+| PostgreSQL | **5433** | 5432 | PostgreSQL database port |
+
+### Why Different Ports?
+
+- **Port 8000**: Often used by production Honcho or other local services
+- **Port 5432**: Default PostgreSQL port, typically occupied by production database instances
+- **Port 8333/5433**: Explicitly chosen to avoid port conflicts when running multiple environments
+
+### Required Updates
+
+When using **development ports**, ensure these files are updated:
+
+1. **Service files**: Change `--port 8000` → `--port 8333` in `honcho-api.service`
+2. **Environment file**: Set `HONCHO_PORT=8333` in `~/.env`
+3. **Database connection**: Update `DB_CONNECTION_URI` to use port `5433`
+
+```bash
+# ~/.env - Development Configuration Example
+HONCHO_PORT=8333
+HONCHO_BASE_URL=http://localhost:8333
+DB_CONNECTION_URI=postgresql+psycopg://user@localhost:5433/honcho_dev
+```
+
+### Port Conflict Detection
+
+Check if a port is already in use:
+```bash
+# Check API port
+lsof -i :8333 || echo "Port 8333 is free"
+lsof -i :8000 || echo "Port 8000 is free"
+
+# Check PostgreSQL port
+lsof -i :5433 || echo "Port 5433 is free"
+lsof -i :5432 || echo "Port 5432 is free"
+```
+
+---
+
 ## Prerequisites
 
 ### 1. System Requirements
@@ -33,14 +78,21 @@ The following must be configured before services can start:
 
 ```bash
 # Required environment file at ~/.env
-HONCHO_BASE_URL=http://localhost:8000
+# For DEVELOPMENT use port 8333:
+HONCHO_BASE_URL=http://localhost:8333
+# For PRODUCTION use port 8000:
+# HONCHO_BASE_URL=http://localhost:8000
+
 HONCHO_WORKSPACE=default
 HONCHO_USER=<user>
 HONCHO_AGENT_ID=agent-pi-mono
 HONCHO_WORKSPACE_MODE=auto
 
 # Database
+# For DEVELOPMENT use port 5433:
 DB_CONNECTION_URI=postgresql+psycopg://<user>@localhost:5433/postgres
+# For PRODUCTION use port 5432:
+# DB_CONNECTION_URI=postgresql+psycopg://<user>@localhost:5432/postgres
 
 # LLM Configuration
 LLM_VLLM_BASE_URL=http://localhost:11434/v1
@@ -84,7 +136,7 @@ Honcho source must be installed at the configured location:
 - Type: `exec` or `simple`
 - Working directory: `~/.local/lib/honcho`
 - Environment file: `~/.env`
-- Port binding: 0.0.0.0:8000 (configurable)
+- Port binding: 0.0.0.0:8333 (dev) or 0.0.0.0:8000 (prod)
 - Dependencies: PostgreSQL, Redis (if using cache)
 
 **Service Specifications**:
@@ -104,12 +156,12 @@ Type=exec
 # Working directory must contain pyproject.toml and src/
 WorkingDirectory=%h/.local/lib/honcho
 
-# Command to start API server
+# Command to start API server (use port 8333 for dev, 8000 for prod)
 # Option A: Using uv run (recommended)
-ExecStart=%h/.local/lib/honcho/.venv/bin/uv run --no-dev fastapi dev src/main.py --host 0.0.0.0 --port 8000
+ExecStart=%h/.local/lib/honcho/.venv/bin/uv run --no-dev fastapi dev src/main.py --host 0.0.0.0 --port 8333
 
 # Option B: Using python directly (faster startup)
-# ExecStart=%h/.local/lib/honcho/.venv/bin/python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+# ExecStart=%h/.local/lib/honcho/.venv/bin/python -m uvicorn src.main:app --host 0.0.0.0 --port 8333 --reload
 
 # Environment
 Environment=PYTHONUNBUFFERED=1
@@ -338,12 +390,14 @@ journalctl --user -u honcho-api -n 100 --no-pager
    - Check file permissions: `ls -la ~/.env`
 
 4. **Port already in use**
-   - Check: `lsof -i :8000`
+   - Check dev port: `lsof -i :8333`
+   - Check prod port: `lsof -i :8000`
    - Kill existing process or change port
 
-5. **PostgreSQL not running**
+5. **PostgreSQL not running or wrong port**
    - Verify: `systemctl status postgresql`
    - Start: `sudo systemctl start postgresql`
+   - Check connection: `psql -h localhost -p 5433 -U <user> -d postgres`
 
 ### Service Starts Then Exits
 
@@ -391,7 +445,8 @@ Create `~/.config/systemd/user/honcho-api.socket`:
 Description=Honcho API Socket
 
 [Socket]
-ListenStream=8000
+# Use 8333 for development, 8000 for production
+ListenStream=8333
 Accept=false
 
 [Install]
@@ -448,7 +503,7 @@ TasksMax=50
 
 ```ini
 [Service]
-ExecStopPost=/bin/sh -c 'if [ "$$EXIT_STATUS" != 0 ]; then notify-send "Honcho API Failed" "Check journalctl"; fi'
+ExecStopPost=/bin/sh -c 'if [ "$$EXIT_STATUS" != 0 ]; then notify-send "Honcho API Failed" "Port 8333 (dev) or 8000 (prod) may be in use - check journalctl"; fi'
 ```
 
 ---
@@ -512,7 +567,8 @@ Wants=network-online.target
 [Service]
 Type=exec
 WorkingDirectory=$HONCHO_DIR
-ExecStart=$HONCHO_DIR/.venv/bin/uv run --no-dev fastapi dev src/main.py --host 0.0.0.0 --port 8000
+# Use port 8333 for development, 8000 for production
+ExecStart=$HONCHO_DIR/.venv/bin/uv run --no-dev fastapi dev src/main.py --host 0.0.0.0 --port 8333
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=%h/.env
 Restart=on-failure

@@ -202,6 +202,7 @@ async def process_representation_tasks_batch(
                 logger.error(
                     "Failed to save representation for observer %s: %s", observer, e
                 )
+                raise  # Let queue manager's retry logic handle it
 
     # Log metrics
     overall_duration = (time.perf_counter() - overall_start) * 1000
