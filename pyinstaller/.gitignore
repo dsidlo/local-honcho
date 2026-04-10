@@ -1,0 +1,39 @@
+# PyInstaller build artifacts
+/build/
+/dist/
+!honcho-pi.spec
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+
+# Python
+.venv/
+venv/
+*.so
+*.dylib
+*.dll
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.local

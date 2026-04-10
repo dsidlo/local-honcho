@@ -264,6 +264,141 @@ class LLMSettings(HonchoSettings):
     )
 
 
+class DeriverRetrySettings(BaseModel):
+    """Retry and error handling for failed work units.
+
+    Controls the in-memory error tracker that determines whether a failed
+    work unit should be retried (reset to unprocessed) or permanently
+    marked as errored (processed=True with error text).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RETRY_", extra="ignore")  # pyright: ignore
+
+    # Maximum retry attempts before marking as permanently failed
+    MAX_RETRIES: int = Field(default=3, gt=0, le=20, description="Max retry attempts per work unit")
+
+    # Exponential backoff: base * 2^(retry_count - 1)
+    BASE_BACKOFF_SEC: float = Field(default=5.0, gt=0.0, le=3600.0, description="Initial backoff in seconds")
+
+    # Maximum backoff cap (prevents unreasonably long waits)
+    MAX_BACKOFF_SEC: float = Field(default=300.0, gt=0.0, le=86400.0, description="Maximum backoff cap in seconds")
+
+    # Forget error records after this long (prevents unbounded memory growth)
+    ERROR_TRACKER_TTL_SEC: float = Field(default=3600.0, gt=0.0, le=86400.0, description="Forget errors after this many seconds")
+
+
+class DeriverWRRSettings(BaseModel):
+    """Weighted Round-Robin queue configuration.
+
+    Prevents starvation of low-volume task types by guaranteeing
+    minimum slots and distributing remaining capacity by weight.
+    """
+
+    # Enable WRR mode (fallback to FIFO if False)
+    ENABLED: bool = Field(default=False)
+
+    # Task type weights - must sum to exactly 1.0 (100%)
+    # idle_fill: percentage of capacity reserved for oldest-available tasks
+    WEIGHTS: dict[str, float] = Field(default={
+        "representation": 0.36,
+        "summary": 0.18,
+        "webhook": 0.18,
+        "dream": 0.09,
+        "reconciler": 0.09,
+        "idle_fill": 0.10,
+    })
+
+    # Minimum guarantees (absolute slots per poll) - prevents starvation
+    # idle_fill always has minimum of 0 since it's opportunistic
+    MIN_SLOTS: dict[str, int] = Field(default={
+        "representation": 2,
+        "summary": 1,
+        "webhook": 2,
+        "dream": 1,
+        "reconciler": 1,
+        "idle_fill": 0,
+    })
+
+    # Maximum slots per type (None means no cap)
+    # idle_fill has no cap since it's flexible capacity
+    MAX_SLOTS: dict[str, int | None] = Field(default={
+        "representation": None,
+        "summary": None,
+        "webhook": None,
+        "dream": 5,
+        "reconciler": 3,
+        "idle_fill": None,
+    })
+
+    # Fill strategy when idle_fill quota is used
+    IDLE_FILL_STRATEGY: Literal["oldest_first", "weighted"] = Field(default="oldest_first")
+
+    # Observability
+    METRICS_ENABLED: bool = Field(default=True)
+    DEBUG_LOGGING: bool = Field(default=False)
+
+    @field_validator("WEIGHTS")
+    @classmethod
+    def validate_weights(cls, v: dict[str, float], info) -> dict[str, float]:
+        """Validate weights sum to exactly 1.0 (100%).
+
+        idle_fill is an explicit task type representing capacity reserved
+        for filling with oldest-available work units across all types.
+        """
+        total = sum(v.values())
+
+        if not (0.999 <= total <= 1.001):  # Allow small floating point variance
+            raise ValueError(
+                f"WRR weights must sum to exactly 1.0 (100%), "
+                f"got {total:.4f} ({total:.1%}). "
+                f"Ensure idle_fill is included in WEIGHTS to account for "
+                f"capacity reserved for oldest-available tasks."
+            )
+
+        if any(w < 0 for w in v.values()):
+            raise ValueError("WRR weights must be non-negative")
+
+        # Validate idle_fill exists
+        if "idle_fill" not in v:
+            raise ValueError(
+                "WEIGHTS must include 'idle_fill' key. "
+                "This specifies the percentage of capacity reserved for "
+                "processing oldest-available work units across all task types."
+            )
+
+        if v["idle_fill"] < 0:
+            raise ValueError("idle_fill weight must be non-negative")
+
+        return v
+
+    @field_validator("MIN_SLOTS")
+    @classmethod
+    def validate_min_slots(cls, v: dict[str, int]) -> dict[str, int]:
+        """Validate minimum slots are non-negative."""
+        if any(s < 0 for s in v.values()):
+            raise ValueError("MIN_SLOTS must be non-negative")
+        return v
+
+    @model_validator(mode="after")
+    def validate_weights_coherence(self) -> "DeriverWRRSettings":
+        """Ensure weight keys match min/max slot keys."""
+        weight_keys = set(self.WEIGHTS.keys())
+        min_slot_keys = set(self.MIN_SLOTS.keys())
+        max_slot_keys = set(self.MAX_SLOTS.keys())
+
+        if weight_keys != min_slot_keys:
+            raise ValueError(
+                f"WEIGHTS keys {weight_keys} must match MIN_SLOTS keys {min_slot_keys}"
+            )
+
+        if weight_keys != max_slot_keys:
+            raise ValueError(
+                f"WEIGHTS keys {weight_keys} must match MAX_SLOTS keys {max_slot_keys}"
+            )
+
+        return self
+
+
 class DeriverSettings(BackupLLMSettingsMixin, HonchoSettings):
     model_config = SettingsConfigDict(env_prefix="DERIVER_", extra="ignore")  # pyright: ignore
 
@@ -307,6 +442,12 @@ class DeriverSettings(BackupLLMSettingsMixin, HonchoSettings):
 
     # When enabled, bypasses the batch token threshold and processes work immediately
     FLUSH_ENABLED: bool = False
+
+    # Weighted Round-Robin queue configuration
+    WRR: DeriverWRRSettings = Field(default_factory=DeriverWRRSettings)
+
+    # Retry and error handling configuration
+    RETRY: DeriverRetrySettings = Field(default_factory=DeriverRetrySettings)
 
     @model_validator(mode="after")
     def validate_batch_tokens_vs_context_limit(self):

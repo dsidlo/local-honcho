@@ -173,18 +173,31 @@ async def create_messages_with_file(
             created_at=form_data.created_at,
         )
 
+        # Filter out blank messages - skip insertion
+        non_blank_data = [
+            data for data in all_message_data if data["message_create"].content and data["message_create"].content.strip()
+        ]
+        skipped_count = len(all_message_data) - len(non_blank_data)
+        if skipped_count > 0:
+            logger.warning(
+                f"Skipped {skipped_count} blank messages from file for session {session_id} - no record inserted"
+            )
+        
+        if not non_blank_data:
+            return []  # No messages to create
+        
         # Create messages
-        message_creates = [data["message_create"] for data in all_message_data]
+        non_blank_messages = [data["message_create"] for data in non_blank_data]
         created_messages = await crud.create_messages(
             db,
-            messages=message_creates,
+            messages=non_blank_messages,
             workspace_name=workspace_id,
             session_name=session_id,
         )
 
         # Update internal_metadata for file-related messages (match indices)
         for i, message in enumerate(created_messages):
-            file_metadata = all_message_data[i]["file_metadata"]
+            file_metadata = non_blank_data[i]["file_metadata"]
             message.internal_metadata.update(file_metadata)
             flag_modified(message, "internal_metadata")
 

@@ -21,7 +21,7 @@ import { homedir } from "node:os";
  * 3. Default values
  * 
  * Environment variables:
- *   HONCHO_BASE_URL=http://localhost:8000 (default)
+ *   HONCHO_BASE_URL=http://localhost:8300 (default)
  *   HONCHO_USER=dsidlo (default)
  *   HONCHO_AGENT_ID=agent-pi-mono (default)
  *   HONCHO_WORKSPACE_MODE=auto | static (default: auto)
@@ -118,7 +118,7 @@ function buildBaseUrl(): string {
   }
   
   // Default
-  return "http://localhost:8000";
+  return "http://localhost:8300";
 }
 
 // Configuration from environment or config file
@@ -779,7 +779,9 @@ export default function (pi: ExtensionAPI) {
         { method: 'POST', body: JSON.stringify({ 
           query: 'recent observations pi session', 
           top_k: 10,
-          filters: { level: 'synthesis' }
+          filters: { level: 'synthesis' },
+          observer: HONCHO_PEER_ID,
+          observed: HONCHO_USER
         }) }
       );
     } catch (e: any) {
@@ -854,7 +856,9 @@ export default function (pi: ExtensionAPI) {
         { method: 'POST', body: JSON.stringify({ 
           query: 'branch observations tree merge',
           top_k: 5,
-          filters: { level: 'inductive' }
+          filters: { level: 'inductive' },
+          observer: HONCHO_PEER_ID,
+          observed: HONCHO_USER
         }) }
       );
     } catch (e: any) {
@@ -1163,7 +1167,7 @@ export default function (pi: ExtensionAPI) {
         try {
           const result = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/conclusions/query`, {
             method: 'POST',
-            body: JSON.stringify({ query: params.query || 'branch', top_k: 10, filters: { branch_id: params.branch_id } })
+            body: JSON.stringify({ query: params.query || 'branch', top_k: 10, filters: { branch_id: params.branch_id }, observer: HONCHO_PEER_ID, observed: HONCHO_USER })
           });
           const summaries = result.map((d: any) => d.content.substring(0, 200)).join('\n');
           return { content: [{ type: "text", text: summaries || 'No branch data' }] };
@@ -1371,6 +1375,8 @@ export default function (pi: ExtensionAPI) {
         const body: any = {
           query: params.query,
           top_k: params.limit || 5,
+          observer: HONCHO_PEER_ID,
+          observed: HONCHO_USER,
         };
         if (params.level) body.filters = { level: params.level };
         

@@ -31,15 +31,8 @@ else:
         }
     )
 
-import re
-
-# Auto-detect and replace postgresql:// with postgresql+asyncpg:// if not already async
-db_url = settings.DB.CONNECTION_URI
-if 'asyncpg' not in db_url and 'postgresql://' in db_url:
-    db_url = re.sub(r'postgresql://', 'postgresql+asyncpg://', db_url)
-
 engine = create_async_engine(
-    db_url,
+    settings.DB.CONNECTION_URI,
     connect_args=connect_args,
     echo=settings.DB.SQL_DEBUG,
     **engine_kwargs,

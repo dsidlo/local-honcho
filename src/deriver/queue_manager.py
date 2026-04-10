@@ -24,6 +24,18 @@ from src.deriver.consumer import (
     process_item,
     process_representation_batch,
 )
+from src.deriver.error_tracker import WorkUnitErrorTracker
+from src.deriver.wrr_metrics import (
+    record_idle_fill,
+    record_quota_calculation,
+    record_task_type_query,
+    record_wrr_poll_summary,
+)
+from src.deriver.wrr_queries import (
+    calculate_wrr_quotas,
+    query_idle_fill_work_units,
+    query_task_type_work_units,
+)
 from src.dreamer.dream_scheduler import (
     DreamScheduler,
     get_dream_scheduler,
@@ -86,6 +98,9 @@ class QueueManager:
         # Initialize Sentry if enabled, using settings
         if settings.SENTRY.ENABLED:
             initialize_sentry(integrations=[AsyncioIntegration()])
+
+        # In-memory error tracker for retry/backoff logic
+        self.error_tracker = WorkUnitErrorTracker()
 
     def add_task(self, task: asyncio.Task[None]) -> None:
         """Track a new task"""
@@ -216,11 +231,180 @@ class QueueManager:
     async def get_and_claim_work_units(self) -> dict[str, str]:
         """
         Get available work units that aren't being processed.
+        
+        If WRR is enabled, uses Weighted Round-Robin scheduling.
+        Otherwise, uses the original FIFO implementation.
+        
+        Returns a dict mapping work_unit_key to aqs_id.
+        """
+        if settings.DERIVER.WRR.ENABLED:
+            return await self._get_and_claim_work_units_weighted()
+        else:
+            return await self._get_and_claim_work_units_fifo()
+
+    async def _get_and_claim_work_units_weighted(self) -> dict[str, str]:
+        """
+        Get and claim work units using Weighted Round-Robin scheduling.
+        
+        RACE SAFETY: This method uses an "optimistic querying" pattern with
+        atomic claim validation. It does not use pessimistic locking. The
+        claim_work_units() method uses PostgreSQL's INSERT ... ON CONFLICT 
+        for atomic claim semantics. See design doc for race condition details.
+        
+        Algorithm:
+        1. Calculate quotas based on configured weights
+        2. Query each task type up to its quota
+        3. Handle idle_fill quota explicitly
+        4. Claim work units atomically via INSERT ON CONFLICT
+        5. Record metrics if enabled
+        """
+        wrr_config = settings.DERIVER.WRR
+        
+        # Calculate available capacity
+        limit: int = max(0, self.workers - self.get_total_owned_work_units())
+        if limit == 0:
+            return {}
+        
+        async with tracked_db("get_available_work_units_weighted") as db:
+            # Calculate quotas per task type
+            quotas = calculate_wrr_quotas(
+                available_workers=limit,
+                weights=wrr_config.WEIGHTS,
+                min_slots=wrr_config.MIN_SLOTS,
+                max_slots=wrr_config.MAX_SLOTS,
+            )
+            
+            if wrr_config.DEBUG_LOGGING:
+                logger.info(f"WRR Quotas: {quotas}")
+            
+            # Track allocations
+            all_work_units: list[str] = []
+            task_type_allocation: dict[str, int] = {}
+            
+            # Phase 1: Query each task type (excluding idle_fill)
+            for task_type, quota in quotas.items():
+                if task_type == "idle_fill" or quota <= 0:
+                    continue
+                
+                work_units = await self._query_task_type(
+                    db=db,
+                    task_type=task_type,
+                    limit=quota,
+                )
+                
+                # Filter out work units that are in error backoff
+                before_filter = len(work_units)
+                work_units = [
+                    wu for wu in work_units
+                    if not self.error_tracker.is_backed_off(wu)
+                ]
+                filtered_count = before_filter - len(work_units)
+                if filtered_count > 0:
+                    logger.info(
+                        f"WRR Filtered {filtered_count} backed-off {task_type} work units"
+                    )
+                
+                all_work_units.extend(work_units)
+                task_type_allocation[task_type] = len(work_units)
+                
+                # Record task type query metrics
+                record_task_type_query(task_type, quota, len(work_units))
+                
+                if wrr_config.DEBUG_LOGGING:
+                    logger.info(
+                        f"WRR Queried {task_type}: "
+                        f"requested={quota}, returned={len(work_units)}"
+                    )
+            
+            # Phase 2: Handle idle_fill quota explicitly
+            idle_fill_quota = quotas.get("idle_fill", 0)
+            idle_fill_filled = 0
+            if idle_fill_quota > 0:
+                # Get already-claimed work units to exclude
+                claimed_work_units = set(all_work_units)
+                
+                fill_units = await query_idle_fill_work_units(
+                    db=db,
+                    limit=idle_fill_quota,
+                    exclude_work_units=claimed_work_units,
+                    strategy=wrr_config.IDLE_FILL_STRATEGY,
+                )
+                # Filter out work units that are in error backoff
+                fill_units = [
+                    wu for wu in fill_units
+                    if not self.error_tracker.is_backed_off(wu)
+                ]
+                all_work_units.extend(fill_units)
+                idle_fill_filled = len(fill_units)
+                task_type_allocation["idle_fill"] = idle_fill_filled
+                
+                # Record idle fill metrics
+                record_idle_fill(idle_fill_filled, idle_fill_quota, wrr_config.IDLE_FILL_STRATEGY)
+                
+                if wrr_config.DEBUG_LOGGING:
+                    logger.info(
+                        f"WRR Idle fill: {len(fill_units)}/{idle_fill_quota} units"
+                    )
+            
+            # Record summary metrics
+            record_wrr_poll_summary(
+                quotas=quotas,
+                allocations=task_type_allocation,
+                idle_fill_requested=idle_fill_quota,
+                idle_fill_filled=idle_fill_filled,
+                strategy=wrr_config.IDLE_FILL_STRATEGY,
+            )
+            
+            # Claim work units
+            if not all_work_units:
+                await db.commit()
+                return {}
+            
+            # NOTE: claim_work_units() performs atomic INSERT ... ON CONFLICT.
+            # If another worker claimed a work unit between query and claim,
+            # it will be excluded from results. This is expected behavior.
+            claimed_mapping = await self.claim_work_units(db, all_work_units)
+            await db.commit()
+            
+            return claimed_mapping
+
+    def _record_wrr_metrics(
+        self,
+        allocation: dict[str, int],
+        total_requested: int,
+    ) -> None:
+        """
+        Record WRR allocation metrics.
+        
+        DEPRECATED: Use wrr_metrics module directly instead.
+        Kept for backward compatibility.
+        """
+        quotas = {k: v for k, v in allocation.items()}
+        record_quota_calculation(quotas, allocation)
+
+    async def _query_task_type(
+        self,
+        db: AsyncSession,
+        task_type: str,
+        limit: int,
+    ) -> list[str]:
+        """
+        Query available work units for a specific task type.
+        
+        This is a simple wrapper around the wrr_queries module functions
+        that handles task type dispatching.
+        """
+        return await query_task_type_work_units(db, task_type, limit)
+
+    async def _get_and_claim_work_units_fifo(self) -> dict[str, str]:
+        """
+        Get available work units that aren't being processed.
         For representation tasks, only returns work units with accumulated tokens
         >= REPRESENTATION_BATCH_MAX_TOKENS (forced batching), unless FLUSH_ENABLED is True.
         Returns a dict mapping work_unit_key to aqs_id.
         """
         limit: int = max(0, self.workers - self.get_total_owned_work_units())
+        logger.info(f"DEBUG: Workers={self.workers}, Owned={self.get_total_owned_work_units()}, Limit={limit}")
         if limit == 0:
             return {}
 
@@ -244,7 +428,11 @@ class QueueManager:
             )
 
             work_units_subq = (
-                select(models.QueueItem.work_unit_key)
+                select(
+                    models.QueueItem.work_unit_key,
+                    func.min(models.Message.created_at).label("oldest_message_at"),
+                )
+                .join(models.Message, models.QueueItem.message_id == models.Message.id)
                 .where(~models.QueueItem.processed)
                 .group_by(models.QueueItem.work_unit_key)
                 .subquery()
@@ -263,7 +451,7 @@ class QueueManager:
             )
 
             query = (
-                select(work_units_subq.c.work_unit_key)
+                select(work_units_subq.c.work_unit_key, work_units_subq.c.oldest_message_at)
                 .limit(limit)
                 .outerjoin(
                     token_stats_subq,
@@ -278,12 +466,16 @@ class QueueManager:
                     .exists()
                 )
                 .where(
-                    # Only include work units that have valid messages
-                    # (join with valid_messages_subq ensures data integrity)
-                    work_units_subq.c.work_unit_key.in_(
-                        select(valid_messages_subq.c.work_unit_key)
+                    # Only validate messages for task types that require them.
+                    # Webhook, reconciler, and dream tasks don't have message_id.
+                    or_(
+                        ~work_units_subq.c.work_unit_key.startswith(representation_prefix),
+                        work_units_subq.c.work_unit_key.in_(
+                            select(valid_messages_subq.c.work_unit_key)
+                        ),
                     )
                 )
+                .order_by(work_units_subq.c.oldest_message_at)
             )
 
             # Apply batch threshold filter (skip if FLUSH_ENABLED is True)
@@ -298,23 +490,41 @@ class QueueManager:
                     )
                 )
 
+            # DEBUG: Log the actual SQL being executed
+            from sqlalchemy.dialects import postgresql
+            sql_str = str(query.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            with open("/tmp/deriver_query.sql", "a") as f:
+                f.write(f"\n--- {datetime.now()} ---\n")
+                f.write(sql_str)
+                f.write("\n")
+            logger.info(f"DEBUG SQL length: {len(sql_str)} chars, saved to /tmp/deriver_query.sql")
+
             result = await db.execute(query)
-            available_units = result.scalars().all()
+            rows = result.all()
+            available_units = [row[0] for row in rows]
+            # Also log the timestamps - now row has 2 columns: work_unit_key, oldest_created_at
+            if rows:
+                logger.info(f"DEBUG: Query returned {len(rows)} rows with timestamps: {[(row[0], row[1]) for row in rows[:5]]}")
+            logger.info(f"DEBUG: Query returned {len(available_units)} available work units: {available_units[:10]}")  # Log first 10
             if not available_units:
                 await db.commit()
                 return {}
 
+            logger.info(f"DEBUG: About to claim {len(available_units)} work units")
             claimed_mapping = await self.claim_work_units(db, available_units)
+            logger.info(f"DEBUG: Successfully claimed {len(claimed_mapping)} work units: {list(claimed_mapping.keys())}")
             
             # NEW: Filter out work units that would return 0 items from get_queue_item_batch.
             # This can happen when queue items reference messages that don't exist
             # in the expected session/workspace (data inconsistency).
             if claimed_mapping:
                 filtered_mapping = {}
+                orphaned_count = 0
                 for work_unit_key, aqs_id in claimed_mapping.items():
                     work_unit = parse_work_unit_key(work_unit_key)
                     if work_unit.task_type == "representation":
-                        # Check if there are actually messages to process
+                        # Check if there are ANY unprocessed queue items with messages
+                        # (not just in expected session - session may have changed/migrated)
                         result = await db.execute(
                             select(func.count(models.Message.id))
                             .select_from(models.QueueItem)
@@ -324,19 +534,13 @@ class QueueManager:
                             )
                             .where(models.QueueItem.work_unit_key == work_unit_key)
                             .where(~models.QueueItem.processed)
-                            .where(
-                                models.Message.workspace_name == work_unit.workspace_name
-                            )
-                            .where(
-                                models.Message.session_name == work_unit.session_name
-                            )
                         )
                         msg_count = result.scalar()
                         if msg_count == 0:
+                            orphaned_count += 1
                             logger.warning(
                                 f"Marked orphan as errored: {work_unit_key} - "
-                                f"no messages found in expected session/workspace "
-                                f"({work_unit.workspace_name}:{work_unit.session_name})"
+                                f"no linked messages found"
                             )
                             # Mark all queue items for this orphan as errored
                             await db.execute(
@@ -357,6 +561,9 @@ class QueueManager:
                             continue
                     filtered_mapping[work_unit_key] = aqs_id
                 claimed_mapping = filtered_mapping
+                logger.info(f"DEBUG: Filtered out {orphaned_count} orphaned work units, returning {len(filtered_mapping)} valid work units")
+            else:
+                logger.info("DEBUG: No work units were claimed (claimed_mapping was empty)")
             
             await db.commit()
 
@@ -370,47 +577,66 @@ class QueueManager:
         Returns only the work units that were successfully claimed.
         Filters out work units that no longer have unprocessed queue items.
         """
-        # First, filter to only work units that still have unprocessed queue items
-        # AND where the referenced messages actually exist.
-        # This prevents claiming work units that were fully processed by another worker
-        # between the time we queried for available work units and now,
-        # AND work units with orphaned queue items (data inconsistency).
-        valid_work_units_query = (
+        # First, filter to only work units that still have unprocessed queue items.
+        # For representation/summary tasks, also validate that messages exist.
+        # Webhook, reconciler, and dream tasks don't require message validation.
+        
+        # Get work units that don't need message validation (webhook, reconciler, dream)
+        no_validation_needed_query = (
+            select(models.QueueItem.work_unit_key)
+            .where(
+                models.QueueItem.work_unit_key.in_(work_unit_keys),
+                ~models.QueueItem.processed,
+            )
+            .where(
+                ~models.QueueItem.work_unit_key.startswith("representation:")
+            )
+            .group_by(models.QueueItem.work_unit_key)
+            .having(func.count(models.QueueItem.id) > 0)
+        )
+        
+        # Get work units that need message validation (representation, summary)
+        needs_validation_query = (
             select(models.QueueItem.work_unit_key)
             .join(models.Message, models.QueueItem.message_id == models.Message.id)
             .where(
                 models.QueueItem.work_unit_key.in_(work_unit_keys),
                 ~models.QueueItem.processed,
             )
+            .where(
+                models.QueueItem.work_unit_key.startswith("representation:")
+            )
             .group_by(models.QueueItem.work_unit_key)
             .having(func.count(models.QueueItem.id) > 0)
             .having(func.count(models.Message.id) > 0)
         )
-        result = await db.execute(valid_work_units_query)
+        
+        # Combine both sets of valid work units
+        combined_query = no_validation_needed_query.union(needs_validation_query)
+        result = await db.execute(combined_query)
         valid_keys = set(result.scalars().all())
+        logger.info(f"DEBUG claim_work_units: Input {len(work_unit_keys)} work units, found {len(valid_keys)} valid: {list(valid_keys)[:5]}")
 
         # Additional validation: filter out orphaned representation work units
-        # where messages don't exist in the expected session/workspace
+        # where messages don't exist (regardless of session/workspace)
         orphaned_keys = set()
         for key in valid_keys:
             try:
                 work_unit = parse_work_unit_key(key)
                 if work_unit.task_type == "representation":
-                    # Check if there are messages in the expected session/workspace
+                    # Check if there are ANY linked messages (not just in expected session)
                     result = await db.execute(
                         select(func.count(models.Message.id))
                         .select_from(models.QueueItem)
                         .join(models.Message, models.QueueItem.message_id == models.Message.id)
                         .where(models.QueueItem.work_unit_key == key)
                         .where(~models.QueueItem.processed)
-                        .where(models.Message.workspace_name == work_unit.workspace_name)
-                        .where(models.Message.session_name == work_unit.session_name)
                     )
                     msg_count = result.scalar()
                     if msg_count == 0:
                         orphaned_keys.add(key)
                         logger.warning(
-                            f"Marked orphan as errored: {key} - no messages in expected session/workspace"
+                            f"Marked orphan as errored: {key} - no linked messages found"
                         )
                         # Mark all queue items for this orphan as errored
                         await db.execute(
@@ -427,6 +653,8 @@ class QueueManager:
                 orphaned_keys.add(key)
         
         valid_keys -= orphaned_keys
+
+        logger.info(f"DEBUG claim_work_units: After orphaned filtering: {len(valid_keys)} valid, {len(orphaned_keys)} orphaned")
 
         if len(valid_keys) < len(work_unit_keys):
             total_filtered = len(work_unit_keys) - len(valid_keys)
@@ -452,7 +680,7 @@ class QueueManager:
         claimed_rows = result.all()
         claimed_mapping = {row[0]: row[1] for row in claimed_rows}
         logger.info(
-            f"Claimed {len(claimed_mapping)} work units: {list(claimed_mapping.keys())}"
+            f"DEBUG claim_work_units FINAL: Inserted {len(claimed_mapping)} of {len(valid_keys)} work units into ActiveQueueSession: {list(claimed_mapping.keys())}"
         )
         return claimed_mapping
 
@@ -475,6 +703,10 @@ class QueueManager:
 
                 try:
                     await self.cleanup_stale_work_units()
+                    # Periodically cleanup expired error tracker records
+                    expired = self.error_tracker.cleanup_expired()
+                    if expired:
+                        logger.info(f"Cleaned up {expired} expired error tracker records")
                     claimed_work_units = await self.get_and_claim_work_units()
                     if claimed_work_units:
                         for work_unit_key, aqs_id in claimed_work_units.items():
@@ -515,38 +747,84 @@ class QueueManager:
         work_unit_key: str,
         context: str,
     ) -> None:
-        """
-        Handle processing errors by marking queue items as errored, logging, and forwarding to Sentry.
-        We only mark the first queue item as errored so we don't potentially throw away a batch. This allows us
-        to incrementally attempt to process the batch while still maintaining progress in a work unit.
+        """Handle processing errors using the retry/error tracker.
+
+        Decision logic:
+        1. Record the error in the in-memory tracker.
+        2. If retries are exhausted AND backoff has expired:
+           - Permanently mark the first queue item as errored
+             (``processed=True, error=...``).
+        3. Otherwise (retries remain or still in backoff):
+           - Reset queue items to ``processed=False`` so they can be
+             re-claimed after the backoff period.
 
         Args:
             error: The exception that occurred
             items: The queue items that were being processed
             work_unit_key: The work unit key for the queue items
-            context: Context string describing what was being processed (e.g., "processing representation batch")
+            context: Context string describing what was being processed
         """
         error_msg = f"{error.__class__.__name__}: {str(error)}"
-        try:
-            if items:
-                await self.mark_queue_item_as_errored(
-                    items[0], work_unit_key, error_msg
-                )
-        except Exception as mark_error:
-            logger.error(
-                f"Failed to mark queue items as errored for work unit {work_unit_key}: {mark_error}",
-                exc_info=True,
-            )
+
+        # Record the error and get updated retry state
+        record = self.error_tracker.record_error(work_unit_key, error_msg)
 
         logger.error(
-            f"Error {context} for work unit {work_unit_key}: {error}",
+            f"Error {context} for work unit {work_unit_key}: {error} "
+            f"[retry {record.retry_count}/{self.error_tracker._max_retries}]",
             exc_info=True,
         )
+
         if settings.SENTRY.ENABLED:
             sentry_sdk.capture_exception(error)
 
+        # Decide: retry or permanently fail?
+        if self.error_tracker.should_escalate(work_unit_key):
+            # Exhausted all retries AND backoff expired → permanent failure
+            logger.warning(
+                f"Work unit {work_unit_key} exhausted {record.retry_count} retries, "
+                f"marking as permanently errored"
+            )
+            try:
+                if items:
+                    await self.mark_queue_item_as_errored(
+                        items[0], work_unit_key, error_msg
+                    )
+            except Exception as mark_error:
+                logger.error(
+                    f"Failed to mark queue items as errored for work unit {work_unit_key}: {mark_error}",
+                    exc_info=True,
+                )
+        else:
+            # Retries remain → reset items to unprocessed for re-claim after backoff
+            backoff_remaining = (record.backoff_until - datetime.now(timezone.utc)).total_seconds()
+            logger.info(
+                f"Work unit {work_unit_key} will be retried "
+                f"(attempt {record.retry_count}/{self.error_tracker._max_retries}, "
+                f"backoff {backoff_remaining:.1f}s)"
+            )
+            try:
+                if items:
+                    await self.reset_queue_items_for_retry(
+                        items, work_unit_key, error_msg
+                    )
+            except Exception as reset_error:
+                logger.error(
+                    f"Failed to reset queue items for retry on work unit {work_unit_key}: {reset_error}",
+                    exc_info=True,
+                )
+
     async def process_work_unit(self, work_unit_key: str, worker_id: str) -> None:
-        """Process all queue items for a specific work unit by routing to the correct handler."""
+        """Process all queue items for a specific work unit by routing to the correct handler.
+
+        On success, clears the error tracker for this work unit. On failure,
+        delegates to ``_handle_processing_error()`` which decides whether to
+        retry (reset items to unprocessed) or permanently fail.
+
+        When items are reset for retry, this worker releases ownership and
+        stops processing the work unit. A future poll will re-claim it after
+        the backoff period expires.
+        """
         logger.info(f"Starting to process work unit {work_unit_key}")
         work_unit = parse_work_unit_key(work_unit_key)
         async with self.semaphore:
@@ -560,6 +838,14 @@ class QueueManager:
                             f"Worker {worker_id} lost ownership of work unit {work_unit_key}, stopping processing {work_unit_key}"
                         )
                         break
+
+                    # Skip work units currently in backoff from a recent error
+                    if self.error_tracker.is_backed_off(work_unit_key):
+                        logger.info(
+                            f"Work unit {work_unit_key} is in backoff, skipping"
+                        )
+                        break
+
                     try:
                         if work_unit.task_type == "representation":
                             (
@@ -602,17 +888,25 @@ class QueueManager:
                                     observed=work_unit.observed,
                                     queue_item_message_ids=queue_item_message_ids,
                                 )
+                                # Success — clear any prior error record
+                                self.error_tracker.clear(work_unit_key)
                                 await self.mark_queue_items_as_processed(
                                     items_to_process, work_unit_key
                                 )
                                 queue_item_count += len(items_to_process)
                             except Exception as e:
+                                # Items may have been reset to unprocessed by
+                                # _handle_processing_error, so release ownership
+                                # and stop processing this work unit for now.
                                 await self._handle_processing_error(
                                     e,
                                     items_to_process,
                                     work_unit_key,
                                     f"processing {work_unit.task_type} batch",
                                 )
+                                # Release ownership so the work unit can be
+                                # re-claimed after backoff expires
+                                break
 
                         else:
                             queue_item = await self.get_next_queue_item(
@@ -626,6 +920,8 @@ class QueueManager:
 
                             try:
                                 await process_item(queue_item)
+                                # Success — clear any prior error record
+                                self.error_tracker.clear(work_unit_key)
                                 await self.mark_queue_items_as_processed(
                                     [queue_item], work_unit_key
                                 )
@@ -637,6 +933,9 @@ class QueueManager:
                                     work_unit_key,
                                     "processing queue item",
                                 )
+                                # Release ownership so the work unit can be
+                                # re-claimed after backoff expires
+                                break
 
                     except Exception as e:
                         logger.error(
@@ -645,6 +944,7 @@ class QueueManager:
                         )
                         if settings.SENTRY.ENABLED:
                             sentry_sdk.capture_exception(e)
+                        break
 
                     # Check for shutdown after processing each batch
                     if self.shutdown_event.is_set():
@@ -943,6 +1243,37 @@ class QueueManager:
                     workspace_name=work_unit.workspace_name,
                     task_type=work_unit.task_type,
                 )
+
+    async def reset_queue_items_for_retry(
+        self,
+        items: list[QueueItem],
+        work_unit_key: str,
+        error: str,
+    ) -> None:
+        """Reset queue items to unprocessed so they can be re-claimed later.
+
+        Used when a transient error occurs and retries remain. The queue
+        item's ``error`` field is updated with the latest error for
+        observability, but ``processed`` is set to False so the item
+        will be picked up again on a future poll.
+        """
+        if not items:
+            return
+        async with tracked_db("reset_queue_items_for_retry") as db:
+            item_ids = [item.id for item in items]
+            await db.execute(
+                update(models.QueueItem)
+                .where(models.QueueItem.id.in_(item_ids))
+                .where(models.QueueItem.work_unit_key == work_unit_key)
+                .values(processed=False, error=error[:65535])
+            )
+            # Keep ActiveQueueSession alive so the work unit stays "in progress"
+            await db.execute(
+                update(models.ActiveQueueSession)
+                .where(models.ActiveQueueSession.work_unit_key == work_unit_key)
+                .values(last_updated=func.now())
+            )
+            await db.commit()
 
     async def mark_queue_item_as_errored(
         self, item: QueueItem, work_unit_key: str, error: str

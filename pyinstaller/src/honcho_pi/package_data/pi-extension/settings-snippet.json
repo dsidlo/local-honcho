@@ -1,0 +1,39 @@
+{
+  "honcho": {
+    "enabled": {{ enabled | default(true) | lower }},
+    "version": "{{ version }}",
+    "api": {
+      "url": "{{ api_url | default('http://localhost:8000') }}",
+      "timeout": {{ api_timeout | default(30000) }},
+      "retries": {{ api_retries | default(3) }}
+    },
+    "workspace": {
+      "name": "{{ workspace_name | default('default') }}",
+      "mode": "{{ workspace_mode | default('auto') }}"
+    },
+    "user": {
+      "id": "{{ user_id | default(lookup('env', 'USER')) }}",
+      "agentId": "{{ agent_id | default('agent-pi-mono') }}"
+    },
+    "features": {
+      "observationalHooks": {{ observational_hooks | default(true) | lower }},
+      "gitBranchTracking": {{ git_branch_tracking | default(true) | lower }},
+      "localCacheFallback": {{ local_fallback | default(true) | lower }},
+      "intelligentChunking": {{ intelligent_chunking | default(true) | lower }},
+      "deduplication": {{ deduplication | default(true) | lower }}
+    },
+    "memory": {
+      "localCacheSizeMB": {{ cache_size_mb | default(100) }},
+      "maxMessageSizeKB": {{ max_message_size_kb | default(1024) }},
+      "compactionThreshold": {{ compaction_threshold | default(1000) }}
+    },
+    "commands": {
+      "enabled": {{ commands_enabled | default(true) | lower }},
+      "prefix": "{{ command_prefix | default('/honcho') }}"
+    },
+    "logging": {
+      "level": "{{ log_level | default('info') }}",
+      "file": "{{ log_file | default('~/.local/share/honcho-pi/pi-extension.log') }}"
+    }
+  }
+}
