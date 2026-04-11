@@ -27,7 +27,7 @@
   - **New Features**: pi-mono Observational-memory duplication (compaction/tree hooks), Git branch integration, local fallback for API issues
 - Uses Python 3.13.12
 - Improved work queue handling to eliminate queue starvation for various work unit types. Change queue processing to WRR Wighted Round Robbing + guaranteed min/max queue priority for work unit types.
-- Switched ollama embedding to qllama/bge-large-en-v1.5:f16, as 1024-dim embedding models were not able to produce embeddings for some content, cause queue work unit errors.
+- Switched ollama embedding to qwen3-embedding:8b, as 1536-dim embedding models were not able to produce embeddings for some content, cause queue work unit errors.
 
 ##### A fork of [plastic-labs/Honcho](https://github.com/plastic-labs/honcho)
 
