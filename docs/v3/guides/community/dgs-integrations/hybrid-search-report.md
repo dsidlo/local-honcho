@@ -1,5 +1,5 @@
 # Vector Search vs RRF Hybrid Search Comparison Report
-**Generated:** 2026-04-08 21:40:40
+**Generated:** 2026-04-09 19:04:25
 **Test Database:** honcho_dev
 
 ## Executive Summary
@@ -33,8 +33,8 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 ### RRF Hybrid Search Results
 | Rank | Document |
 |------|----------|
-| 1 | The user needs help fixing database connectoin issues |
-| 2 | Database connection pooling configuration |
+| 1 | Database connection pooling configuration |
+| 2 | The user needs help fixing database connectoin issues |
 | 3 | Connection strings and authentication |
 | 4 | PostgreSQL database performance optimization |
 
@@ -46,7 +46,7 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 **Key Observations:**
 
 - **Overlap in results** shows documents that are both semantically similar and textually relevant.
-- **Ranking differences:** Documents appearing in both lists have an average rank difference of 0.0 positions. RRF re-ranks based on combined evidence.
+- **Ranking differences:** Documents appearing in both lists have an average rank difference of 0.5 positions. RRF re-ranks based on combined evidence.
 
 
 ---

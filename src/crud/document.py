@@ -335,9 +335,9 @@ async def create_documents(
     Returns:
         Count of new documents
     """
-    logger.info(f"DEBUG CREATE_DOCUMENTS: called with {len(documents)} documents, workspace={workspace_name}, observer={observer}, observed={observed}, deduplicate={deduplicate}")
+    logger.debug(f"[CREATE-DOCS] Entry: {len(documents)} documents, workspace={workspace_name}, observer={observer}, observed={observed}, deduplicate={deduplicate}")
     for i, doc in enumerate(documents[:3]):  # Log first 3 docs
-        logger.info(f"DEBUG DOC {i}: session={doc.session_name}, level={doc.level}, has_embedding={bool(doc.embedding)}, content_len={len(doc.content)}")
+        logger.debug(f"[CREATE-DOCS] Doc {i}: session={doc.session_name}, level={doc.level}, has_embedding={bool(doc.embedding)}, content_len={len(doc.content)}")
 
     honcho_documents: list[models.Document] = []
     # Store (document_model, embedding) pairs - IDs aren't available until after commit
@@ -408,19 +408,19 @@ async def create_documents(
 
     try:
         db.add_all(honcho_documents)
-        logger.info(f"DEBUG CREATE_DOCUMENTS: Added {len(honcho_documents)} documents to session, committing...")
+        logger.debug(f"[CREATE-DOCS] Added {len(honcho_documents)} documents to session, committing...")
         # NOTE
         # If the process crashes after this commit but before vector upsert completes,
         # documents will be left in sync_state='pending' with NULL embeddings.
         # The reconciliation job will automatically re-embed and sync these documents,
         await db.commit()
-        logger.info(f"DEBUG CREATE_DOCUMENTS: Committed successfully. {len(docs_with_embeddings)} docs have embeddings")
+        logger.debug(f"[CREATE-DOCS] Committed successfully. {len(docs_with_embeddings)} docs have embeddings")
 
         # Store embeddings in external vector store after documents are committed (IDs now available)
         if docs_with_embeddings:
             doc_ids = [doc.id for doc, _ in docs_with_embeddings]
             external_vector_store = get_external_vector_store()
-            logger.info(f"DEBUG VECTOR_STORE: type={settings.VECTOR_STORE.TYPE}, migrated={settings.VECTOR_STORE.MIGRATED}, external_store={external_vector_store is not None}")
+            logger.debug(f"[CREATE-DOCS] Vector store: type={settings.VECTOR_STORE.TYPE}, migrated={settings.VECTOR_STORE.MIGRATED}, external_store={external_vector_store is not None}")
 
             # If no external vector store (pgvector mode), mark as synced immediately
             if external_vector_store is None:
@@ -780,14 +780,24 @@ async def create_observations(
 
     except IntegrityError as e:
         await db.rollback()
+        logger.error(
+            f"[CREATE-OBS] Integrity error: {e}, "
+            f"rolling back {len(honcho_documents)} observations"
+        )
         raise ValidationException(
             "Failed to create observations due to integrity constraint violation"
         ) from e
+    except Exception as e:
+        await db.rollback()
+        logger.error(
+            f"[CREATE-OBS] Unexpected error during document commit: "
+            f"{type(e).__name__}: {e}"
+        )
+        raise
 
     logger.debug(
-        "Created %d observations in workspace %s",
-        len(honcho_documents),
-        workspace_name,
+        f"[CREATE-OBS] Complete: created {len(honcho_documents)} observations "
+        f"in workspace {workspace_name}"
     )
     return honcho_documents
 

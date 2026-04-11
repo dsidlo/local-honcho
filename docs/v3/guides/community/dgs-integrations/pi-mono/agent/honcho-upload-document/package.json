@@ -1,0 +1,21 @@
+{
+  "name": "honcho-upload-document-skill",
+  "version": "1.0.0",
+  "description": "Upload documents to Honcho with automatic PDF text extraction using LiteParse",
+  "type": "module",
+  "main": "upload.ts",
+  "exports": {
+    ".": "./upload.ts"
+  },
+  "keywords": [
+    "honcho",
+    "upload",
+    "document",
+    "pdf",
+    "liteparse",
+    "memory"
+  ],
+  "scripts": {
+    "test": "tsx upload.ts test.txt"
+  }
+}
