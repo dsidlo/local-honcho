@@ -731,7 +731,10 @@ class DeriverSettings(HonchoSettings):
 
     LOG_OBSERVATIONS: bool = False
 
-    MAX_INPUT_TOKENS: Annotated[int, Field(default=23000, gt=0, le=23000)] = 23000
+    MAX_INPUT_TOKENS: Annotated[int, Field(default=25000, gt=0, le=25000)] = 25000
+    MAX_CUSTOM_INSTRUCTIONS_TOKENS: Annotated[
+        int, Field(default=2000, ge=0, le=2000)
+    ] = 2000
 
     # Maximum number of observations to return in working representation
     # This is applied to both explicit and deductive observations
