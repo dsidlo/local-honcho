@@ -664,6 +664,7 @@ async def clone_session(
     if cutoff_message_id is not None:
         stmt = select(models.Message).where(
             models.Message.public_id == cutoff_message_id,
+            models.Message.workspace_name == workspace_name,
             models.Message.session_name == original_session_name,
         )
         cutoff_message = await db.scalar(stmt)
@@ -682,9 +683,12 @@ async def clone_session(
     db.add(new_session)
     await db.flush()  # Flush to get the new session ID
 
-    # Build query for messages to clone
+    # Build query for messages to clone (scoped to this workspace: session
+    # names are only unique per workspace, and other workspaces sharing the
+    # name must not leak into the clone)
     stmt = select(models.Message).where(
-        models.Message.session_name == original_session_name
+        models.Message.workspace_name == workspace_name,
+        models.Message.session_name == original_session_name,
     )
     if cutoff_message_id is not None and cutoff_message is not None:
         stmt = stmt.where(models.Message.id <= cast(cutoff_message.id, BigInteger))
@@ -715,7 +719,8 @@ async def clone_session(
 
     # Clone peers from original session to new session (including their configurations)
     stmt = select(models.SessionPeer).where(
-        models.SessionPeer.session_name == original_session_name
+        models.SessionPeer.workspace_name == workspace_name,
+        models.SessionPeer.session_name == original_session_name,
     )
     result = await db.execute(stmt)
     session_peers = result.scalars().all()

@@ -476,6 +476,55 @@ def test_clone_session_with_cutoff(
     assert "id" in data
 
 
+def test_clone_session_scoped_to_workspace(
+    client: TestClient, sample_data: tuple[Workspace, Peer]
+):
+    """Clone must not pull messages from same-named sessions in other workspaces.
+
+    Regression: the clone message query filtered by session_name only, so any
+    other workspace containing a session with the same name leaked its
+    messages into the clone, violating the (workspace, session, seq_in_session)
+    unique constraint with duplicate rows from foreign workspaces.
+    """
+    test_workspace, test_peer = sample_data
+
+    # A second workspace with a same-named session containing a message
+    other_workspace = str(generate_nanoid())
+    client.post(f"/v3/workspaces/{other_workspace}", json={"id": other_workspace})
+    client.post(
+        f"/v3/workspaces/{other_workspace}/sessions",
+        json={"id": "shared-session-name", "peer_names": {test_peer.name: {}}},
+    )
+    client.post(
+        f"/v3/workspaces/{other_workspace}/sessions/shared-session-name/messages",
+        json={"messages": [{"content": "foreign message", "peer_id": test_peer.name}]},
+    )
+
+    # Same-named session in the test workspace, with its own message
+    client.post(
+        f"/v3/workspaces/{test_workspace.name}/sessions",
+        json={"id": "shared-session-name", "peer_names": {test_peer.name: {}}},
+    )
+    client.post(
+        f"/v3/workspaces/{test_workspace.name}/sessions/shared-session-name/messages",
+        json={"messages": [{"content": "local message", "peer_id": test_peer.name}]},
+    )
+
+    response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/sessions/shared-session-name/clone",
+    )
+    assert response.status_code == 201
+    cloned_id = response.json()["id"]
+
+    response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/sessions/{cloned_id}/messages/list",
+        json={},
+    )
+    assert response.status_code == 200
+    contents = [m["content"] for m in response.json()["items"]]
+    assert contents == ["local message"], f"foreign rows leaked: {contents}"
+
+
 def test_add_peers_to_session(client: TestClient, sample_data: tuple[Workspace, Peer]):
     test_workspace, test_peer = sample_data
     # Create another peer
