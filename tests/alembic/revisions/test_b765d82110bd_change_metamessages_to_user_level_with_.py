@@ -23,14 +23,15 @@ _INDEXES = (
 def prepare_metamessages(verifier: MigrationVerifier) -> None:
     schema = verifier.schema
     connection = verifier.conn
-    # Create app
+    # Create app (unique name seeded fresh per hook run to survive schema resets)
     APP_ID = generate_nanoid()
+    APP_NAME = "test-app-" + generate_nanoid()[:8]
     connection.execute(
         text(
             f'INSERT INTO "{schema}"."apps" ("public_id", "name") '
             + "VALUES (:app_id, :name)"
         ),
-        {"app_id": APP_ID, "name": "test-app"},
+        {"app_id": APP_ID, "name": APP_NAME},
     )
 
     # Create user
@@ -39,7 +40,7 @@ def prepare_metamessages(verifier: MigrationVerifier) -> None:
             f'INSERT INTO "{schema}"."users" ("public_id", "name", "app_id") '
             + "VALUES (:user_id, :name, :app_id)"
         ),
-        {"user_id": USER_ID, "name": "test-user", "app_id": APP_ID},
+        {"user_id": USER_ID, "name": "test-user-" + generate_nanoid()[:8], "app_id": APP_ID},
     )
 
     # Create session

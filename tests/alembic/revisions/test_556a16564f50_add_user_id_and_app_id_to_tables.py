@@ -12,6 +12,8 @@ APP_ID = generate_nanoid()
 USER_ID = generate_nanoid()
 SESSION_ID = generate_nanoid()
 MESSAGE_ID = generate_nanoid()
+APP_NAME = "test-app-" + generate_nanoid()[:8]
+USER_NAME = "test-user-" + generate_nanoid()[:8]
 METAMESSAGE_ID = generate_nanoid()
 COLLECTION_ID = generate_nanoid()
 DOCUMENT_ID = generate_nanoid()
@@ -28,7 +30,7 @@ def prepare_user_app_ids(verifier: MigrationVerifier) -> None:
             f'INSERT INTO "{schema}"."apps" ("public_id", "name") '
             + "VALUES (:app_id, :name)"
         ),
-        {"app_id": APP_ID, "name": "test-app"},
+        {"app_id": APP_ID, "name": APP_NAME},
     )
 
     # Create user
@@ -37,7 +39,7 @@ def prepare_user_app_ids(verifier: MigrationVerifier) -> None:
             f'INSERT INTO "{schema}"."users" ("public_id", "name", "app_id") '
             + "VALUES (:user_id, :name, :app_id)"
         ),
-        {"user_id": USER_ID, "name": "test-user", "app_id": APP_ID},
+        {"user_id": USER_ID, "name": USER_NAME, "app_id": APP_ID},
     )
 
     # Create session

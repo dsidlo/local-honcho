@@ -1,4 +1,5 @@
 import logging  # noqa: I001
+import os
 import sys
 from logging.config import fileConfig
 from pathlib import Path
@@ -7,33 +8,18 @@ from urllib.parse import urlparse, urlunparse
 from alembic import context
 from sqlalchemy import engine_from_config, pool, text
 
-# Override environment for migration
-import os
-os.environ['HONCHO_DB_CONNECTION_URI'] = 'postgresql+psycopg://dsidlo:YOUR_PASSWORD@127.0.0.1:5433/honcho'
-os.environ['LLM__EMBEDDING_PROVIDER'] = 'ollama'
+# Ensure a connection URI is always present for the migration process.
+# Alembic runs with only the base environment; src.config requires a URI.
+# If none is configured, fall back to the local Unix-socket postgres.
+os.environ.setdefault(
+    'HONCHO_DB_CONNECTION_URI',
+    'postgresql+psycopg://dsidlo@localhost:5433/honcho_dev',
+)
+os.environ.setdefault('LLM__EMBEDDING_PROVIDER', 'ollama')
 
-import os
+from src.config import settings
 
-# Set env vars for migration to avoid pydantic errors
-os.environ['HONCHO_DB_CONNECTION_URI'] = 'postgresql+psycopg2://dsidlo:YOUR_PASSWORD@127.0.0.1:5433/honcho_dev'
-os.environ['LLM__EMBEDDING_PROVIDER'] = 'ollama'
-
-# Mock settings to avoid full load
-class MockSettings:
-    class DB:
-        CONNECTION_URI = os.getenv('HONCHO_DB_CONNECTION_URI')
-    DB = DB()
-
-settings = MockSettings()
-
-# Import your models
-from src.db import Base
-
-# Import all models so they register with Base.metadata
-# Skip full models load to avoid config
-# import src.models  # noqa: F401
-
-from src.models import Base  # Only Base for metadata
+from src.models import Base  # noqa: F401  (registers all models on Base.metadata)
 
 
 # Set up logging more verbosely
@@ -66,8 +52,12 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    url = settings.DB.CONNECTION_URI
-    if url is None:
+    # Prefer the URL the caller pinned into the Alembic config (tests point
+    # this at a dedicated migration-test database). Fall back to app settings.
+    url = config.get_main_option("sqlalchemy.url")
+    if not url or url == "driver://user:pass@localhost/dbname":
+        url = settings.DB.CONNECTION_URI
+    if not url:
         raise ValueError("DB_CONNECTION_URI not set")
     return url
 
@@ -104,13 +94,24 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    # Tests may inject a connection into the config; reuse it if present.
+    connection = config.attributes.get("connection")
 
-    with connectable.connect() as connection:
+    if connection is None:
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
+            url=get_url(),
+        )
+        with connectable.connect() as connection:
+            context.configure(
+                connection=connection, target_metadata=target_metadata
+            )
+
+            with context.begin_transaction():
+                context.run_migrations()
+    else:
         context.configure(
             connection=connection, target_metadata=target_metadata
         )
