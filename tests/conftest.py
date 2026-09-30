@@ -5,6 +5,7 @@ No mocks, no Redis (cache disabled for tests).
 """
 
 import logging
+import os
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -60,7 +61,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("sqlalchemy.engine.Engine").disabled = True
 
 # Test database URL
-DB_URI = settings.DB.CONNECTION_URI
+DB_URI = os.environ.get("HONCHO_TEST_DB_URI") or settings.DB.CONNECTION_URI
 if not DB_URI:
     raise ValueError("DB.CONNECTION_URI must be set in configuration or environment.")
 CONNECTION_URI = make_url(DB_URI)
