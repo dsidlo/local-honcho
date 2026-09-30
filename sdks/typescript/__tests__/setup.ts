@@ -27,7 +27,9 @@ import { Honcho } from '../src'
 export const TEST_CONFIG = {
   baseURL: process.env.HONCHO_TEST_URL || 'http://localhost:8000',
   apiKey: process.env.HONCHO_TEST_API_KEY,
-  timeout: 30000, // 30 seconds for integration tests
+  // Agentic chats with tool loops commonly take 30-75s; honor an env override
+  // so slow CI machines can raise it without code changes.
+  timeout: Number(process.env.HONCHO_TEST_TIMEOUT) || 90000,
 } as const
 
 /**
