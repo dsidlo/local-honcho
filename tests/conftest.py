@@ -4,6 +4,7 @@ Uses real resources: PostgreSQL with pgvector, Ollama embeddings, real LLM calls
 No mocks, no Redis (cache disabled for tests).
 """
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncGenerator
@@ -228,6 +229,11 @@ async def setup_cache():
     # Close cache
     try:
         await cache.close()
+    except asyncio.CancelledError:
+        # cashews' memory backend close() can surface CancelledError from its
+        # internal expiry task when the session loop is unwinding; nothing to
+        # propagate from a disabled no-op cache.
+        pass
     except Exception:
         pass
 
