@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from logging import getLogger
 from typing import Any, Literal, cast
 
+import sqlalchemy as sa
 from sqlalchemy import delete, select, text, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
@@ -1086,12 +1087,21 @@ async def query_documents_hybrid(
         models.Document.deleted_at.is_(None),
     ]
 
-    # Apply optional filters
+    # Apply optional filters through apply_filter so operator forms like
+    # {"level": {"in": [...]}} compile to proper SQL (IN clauses) instead of
+    # being bound raw as a dict, which psycopg cannot adapt.
     if filters:
-        if "level" in filters:
-            base_filters.append(models.Document.level == filters["level"])
-        if "session_name" in filters:
-            base_filters.append(models.Document.session_name == filters["session_name"])
+        filter_stmt = apply_filter(
+            sa.select(models.Document.id), models.Document, filters
+        )
+        where_clause = filter_stmt.whereclause
+        if where_clause is not None:
+            conditions = (
+                where_clause.clauses
+                if isinstance(where_clause, sa.sql.elements.BooleanClauseList)
+                else [where_clause]
+            )
+            base_filters.extend(conditions)
 
     # Dispatch to the appropriate method
     if method == "cascade":

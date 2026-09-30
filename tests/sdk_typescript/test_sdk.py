@@ -6,6 +6,7 @@ This ensures SDK changes don't break when server code changes.
 """
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,22 @@ import pytest
 
 # Path to the TypeScript SDK
 SDK_PATH = Path(__file__).parent.parent.parent / "sdks" / "typescript"
+
+
+def _require_bun() -> str:
+    """Resolve the bun binary or fail fast with install instructions.
+
+    Without this check, failing subprocess.run (FileNotFoundError) only
+    surfaces after the server fixture boots; and a bun that exists but is
+    not on subprocess's PATH silently hangs the test for the full timeout.
+    """
+    result = shutil.which("bun")
+    if result is None:
+        pytest.fail(
+            "'bun' not found on PATH. Install it (https://bun.sh) or add "
+            "~/.bun/bin to PATH to run TypeScript SDK tests."
+        )
+    return result
 
 
 def test_typescript_sdk(ts_test_server: str):
@@ -25,6 +42,7 @@ def test_typescript_sdk(ts_test_server: str):
     3. Runs `bun test` and captures output
     4. Fails if any TypeScript tests fail
     """
+    _require_bun()
     env = {
         **os.environ,
         "HONCHO_TEST_URL": ts_test_server,
@@ -58,6 +76,7 @@ def test_typescript_sdk_typecheck():
 
     This ensures the SDK's types are consistent with usage patterns.
     """
+    _require_bun()
     result = subprocess.run(
         ["bun", "run", "typecheck"],
         cwd=str(SDK_PATH),
