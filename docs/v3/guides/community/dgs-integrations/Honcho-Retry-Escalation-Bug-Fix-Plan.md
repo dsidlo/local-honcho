@@ -194,4 +194,4 @@ question (the tailer already keeps byte-offset state in
    with no sleep.
 2. `marking as permanently errored` appears in the journal under a forced failure.
 3. Retry counters are bounded by `MAX_RETRIES`, not by `ERROR_TRACKER_TTL_SEC`.
-4. No regression in the 21 existing `test_error_tracker.py` tests.
+4. No regression in the 20 existing `test_error_tracker.py` tests.
