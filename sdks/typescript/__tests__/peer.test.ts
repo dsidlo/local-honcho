@@ -16,6 +16,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { z } from 'zod'
 import { Honcho, Peer } from '../src'
 import { createTestClient, generateId, requireServer } from './setup'
 import {
@@ -52,6 +53,18 @@ describe('Peer', () => {
       expect(peer).toBeInstanceOf(Peer)
       expect(peer.id).toBe('simple-peer')
       expect(peer.workspaceId).toBe(client.workspaceId)
+      expect(peer.createdAt).toBeDefined()
+    })
+
+    test('peer created with metadata exposes createdAt', async () => {
+      const peer = await client.peer('peer-created-at', {
+        metadata: { test: true },
+      })
+
+      expect(peer.createdAt).toBeDefined()
+      expect(typeof peer.createdAt).toBe('string')
+      const createdAt = new Date(peer.createdAt!)
+      expect(Number.isNaN(createdAt.getTime())).toBe(false)
     })
 
     test('creates peer with metadata', async () => {
@@ -116,10 +129,22 @@ describe('Peer', () => {
         metadata: { uniqueTag },
       })
 
-      const page = await client.peers({ metadata: { uniqueTag } })
+      const page = await client.peers({ filters: { metadata: { uniqueTag } } })
 
       expect(page.items.length).toBe(1)
       expect(page.items[0].id).toBe('filtered-peer')
+    })
+
+    test('peers accept legacy raw filter objects', async () => {
+      const uniqueTag = `legacy-tag-${Date.now()}`
+      await client.peer(`legacy-filtered-peer-${Date.now()}`, {
+        metadata: { uniqueTag },
+      })
+
+      const page = await client.peers({ metadata: { uniqueTag } })
+
+      expect(page.items.length).toBe(1)
+      expect(page.items[0].metadata.uniqueTag).toBe(uniqueTag)
     })
 
     test('Page is async iterable', async () => {
@@ -213,9 +238,23 @@ describe('Peer', () => {
       })
       await session.addPeers([peer.id])
 
-      const sessions = await peer.sessions({ metadata: { category: 'special' } })
+      const sessions = await peer.sessions({ filters: { metadata: { category: 'special' } } })
 
       expect(sessions.items.length).toBeGreaterThanOrEqual(1)
+    })
+
+    test('sessions accept legacy raw filter objects', async () => {
+      const category = `legacy-category-${Date.now()}`
+      const peer = await client.peer(`legacy-filter-sessions-peer-${Date.now()}`)
+      const session = await client.session(`legacy-filterable-session-${Date.now()}`, {
+        metadata: { category },
+      })
+      await session.addPeers([peer.id])
+
+      const sessions = await peer.sessions({ metadata: { category } })
+
+      expect(sessions.items.length).toBeGreaterThanOrEqual(1)
+      expect(sessions.items[0].metadata.category).toBe(category)
     })
   })
 
@@ -551,6 +590,37 @@ describe('Peer', () => {
       expect(response === null || typeof response === 'string').toBe(true)
     })
 
+    test('chat with includeEvidence returns answer and evidence', async () => {
+      const peer = await client.peer('chat-evidence-peer')
+      const session = await client.session('chat-evidence-session', {
+        metadata: {},
+      })
+
+      await session.addPeers([peer.id])
+      await session.addMessages([peer.message('I enjoy hiking')])
+
+      const result = await peer.chat('What does this user enjoy?', {
+        includeEvidence: true,
+      })
+
+      // The answer is wrapped rather than returned bare, and evidence is
+      // present even when the run read nothing -- empty is not absent.
+      expect(result).toHaveProperty('content')
+      expect(result).toHaveProperty('evidence')
+      expect(result.evidence).not.toBeNull()
+      expect(Array.isArray(result.evidence?.conclusions)).toBe(true)
+      expect(Array.isArray(result.evidence?.messages)).toBe(true)
+      expect(Array.isArray(result.evidence?.tool_calls)).toBe(true)
+    })
+
+    test('chat without includeEvidence still returns a bare answer', async () => {
+      const peer = await client.peer('chat-no-evidence-peer')
+
+      const response = await peer.chat('What does this user enjoy?')
+
+      expect(response === null || typeof response === 'string').toBe(true)
+    })
+
     test('chat with session scope', async () => {
       const peer = await client.peer('chat-session-peer')
       const session = await client.session('chat-scoped-session', { metadata: {} })
@@ -586,6 +656,44 @@ describe('Peer', () => {
       expect(response === null || typeof response === 'string').toBe(true)
     })
 
+    test('chat with responseFormat as JSON schema object returns JSON string', async () => {
+      const peer = await client.peer('chat-rf-peer')
+
+      const response = await peer.chat('What do you know?', {
+        responseFormat: {
+          type: 'object',
+          properties: { summary: { type: 'string' } },
+        },
+      })
+
+      expect(response === null || typeof response === 'string').toBe(true)
+      if (response !== null) {
+        expect(() => JSON.parse(response)).not.toThrow()
+      }
+    })
+
+    test('chat with responseFormat as Zod schema returns parsed object', async () => {
+      const peer = await client.peer('chat-rf-zod-peer')
+      const ResultSchema = z.object({ summary: z.string().optional() })
+
+      const response = await peer.chat('What do you know?', {
+        responseFormat: ResultSchema,
+      })
+
+      expect(response === null || typeof response === 'object').toBe(true)
+    })
+
+    test('chat with unsupported responseFormat is rejected by the server', async () => {
+      const peer = await client.peer('chat-rf-invalid-peer')
+
+      // Non-object root is rejected with 422
+      await expect(
+        peer.chat('What do you know?', {
+          responseFormat: { type: 'string' },
+        })
+      ).rejects.toThrow()
+    })
+
     // Streaming tests are in streaming.test.ts
   })
 
@@ -594,7 +702,7 @@ describe('Peer', () => {
   // ===========================================================================
 
   describe('Conclusion scope access', () => {
-    test('conclusions property returns ConclusionScope for self', async () => {
+    test('conclusions property returns ConclusionsView for self', async () => {
       const peer = await client.peer('self-conclusions-peer')
 
       const scope = peer.conclusions
@@ -604,7 +712,7 @@ describe('Peer', () => {
       expect(scope.workspaceId).toBe(client.workspaceId)
     })
 
-    test('conclusionsOf returns ConclusionScope for target', async () => {
+    test('conclusionsOf returns ConclusionsView for target', async () => {
       const observer = await client.peer('obs-conclusions-peer')
       const target = await client.peer('target-conclusions-peer')
 
@@ -635,6 +743,34 @@ describe('Peer', () => {
       const str = peer.toString()
 
       expect(str).toBe("Peer(id='tostring-peer')")
+    })
+  })
+
+  // ===========================================================================
+  // Pagination Controls
+  // ===========================================================================
+
+  describe('Pagination controls', () => {
+    test('peers with custom page size', async () => {
+      // Create peers with unique metadata
+      await client.peer('page-peer-1', { metadata: { group: 'page-test' } })
+      await client.peer('page-peer-2', { metadata: { group: 'page-test' } })
+      await client.peer('page-peer-3', { metadata: { group: 'page-test' } })
+
+      const page = await client.peers({
+        filters: { metadata: { group: 'page-test' } },
+        size: 2,
+      })
+      expect(page.items.length).toBe(2)
+    })
+
+    test('peers with explicit page number', async () => {
+      const page2 = await client.peers({
+        filters: { metadata: { group: 'page-test' } },
+        page: 2,
+        size: 2,
+      })
+      expect(page2.items.length).toBe(1)
     })
   })
 })

@@ -7,18 +7,31 @@ and synthesize responses to queries about a peer.
 
 import logging
 import time
-import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any, cast
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from nanoid import generate as generate_nanoid
+from pydantic import BaseModel
 
-from src import crud
-from src.config import ReasoningLevel, settings
+from src import crud, models
+from src.config import (
+    ConfiguredModelSettings,
+    DialecticLevelSettings,
+    ReasoningLevel,
+    settings,
+)
+from src.dependencies import tracked_db
 from src.dialectic import prompts
 from src.embedding_client import embedding_client
+from src.llm import (
+    HonchoLLMCallResponse,
+    StreamingResponseWithMetadata,
+    honcho_llm_call,
+)
+from src.llm.runtime import CapturedAgentSpan, start_captured_span
+from src.llm.types import LLMTelemetryContext
 from src.telemetry import prometheus_metrics
-from src.telemetry.events import DialecticCompletedEvent, emit
+from src.telemetry.events import DialecticCompletedEvent, EmbeddingCallPurpose, emit
 from src.telemetry.logging import (
     accumulate_metric,
     log_performance_metrics,
@@ -31,14 +44,17 @@ from src.utils.agent_tools import (
     create_tool_executor,
     search_memory,
 )
-from src.utils.clients import (
-    HonchoLLMCallResponse,
-    StreamingResponseWithMetadata,
-    honcho_llm_call,
-)
+from src.utils.evidence import EvidenceAccumulator
 from src.utils.formatting import format_new_turn_with_timestamp
+from src.utils.types import embedding_call_purpose
 
 logger = logging.getLogger(__name__)
+
+
+def _get_dialectic_level_model_config(
+    reasoning_level: ReasoningLevel,
+) -> ConfiguredModelSettings:
+    return settings.DIALECTIC.LEVELS[reasoning_level].MODEL_CONFIG
 
 
 class DialecticAgent:
@@ -52,7 +68,6 @@ class DialecticAgent:
 
     def __init__(
         self,
-        db: AsyncSession,
         workspace_name: str,
         session_name: str | None,
         observer: str,
@@ -61,12 +76,14 @@ class DialecticAgent:
         observed_peer_card: list[str] | None = None,
         metric_key: str | None = None,
         reasoning_level: ReasoningLevel = "low",
+        session_id: str | None = None,
+        session_allowlist: list[str] | None = None,
+        evidence: EvidenceAccumulator | None = None,
     ):
         """
         Initialize the dialectic agent.
 
         Args:
-            db: Database session
             workspace_name: Workspace identifier
             session_name: Session identifier (may be None for global queries)
             observer: The peer making the query
@@ -75,10 +92,18 @@ class DialecticAgent:
             observed_peer_card: Biographical information about the observed peer
             metric_key: Optional key for logging metrics (if provided, agent won't log separately)
             reasoning_level: Level of reasoning to apply
+            session_id: ID used for grouping traces (not session_name)
+            session_allowlist: Optional session allowlist restricting all recall
+                (conclusions and messages) to these sessions; empty list
+                fails closed
+            evidence: Optional accumulator collecting the conclusions and
+                messages this run reads, for callers that asked for evidence.
+                Passing None collects nothing.
         """
-        self.db: AsyncSession = db
         self.workspace_name: str = workspace_name
         self.session_name: str | None = session_name
+        self.session_allowlist: list[str] | None = session_allowlist
+        self.session_id: str | None = session_id
         self.observer: str = observer
         self.observed: str = observed
         self.observer_peer_card: list[str] | None = observer_peer_card
@@ -91,15 +116,62 @@ class DialecticAgent:
             {
                 "role": "system",
                 "content": prompts.agent_system_prompt(
-                    observer, observed, observer_peer_card, observed_peer_card
+                    observer,
+                    observed,
+                    observer_peer_card,
+                    observed_peer_card,
+                    available_tools={
+                        name
+                        for tool in self._select_tools()
+                        if isinstance((name := tool.get("name")), str)
+                    },
                 ),
             }
         ]
         self._session_history_initialized: bool = False
         self._prefetched_conclusion_count: int = 0
-        self._run_id: str = str(uuid.uuid4())[
-            :8
-        ]  # Always generate for event correlation
+        self.evidence: EvidenceAccumulator | None = evidence
+        self._run_id: str = generate_nanoid()  # Always generate for event correlation
+
+    def _select_tools(self) -> list[dict[str, Any]]:
+        """Pick the toolset for this query.
+
+        Minimal reasoning uses a reduced set to reduce cost. Under a session
+        allowlist `get_reasoning_chain` is dropped entirely rather than left in
+        to fail at call time: chains traverse provenance across sessions, so it
+        can't be scoped, and offering it costs both the schema in context and a
+        wasted turn when the model tries it.
+        """
+        tools = (
+            DIALECTIC_TOOLS_MINIMAL
+            if self.reasoning_level == "minimal"
+            else DIALECTIC_TOOLS
+        )
+        if self.session_allowlist is not None:
+            tools = [t for t in tools if t.get("name") != "get_reasoning_chain"]
+        return tools
+
+    def _tool_choice(
+        self, level_settings: DialecticLevelSettings
+    ) -> str | dict[str, Any] | None:
+        """Pick the tool_choice for this query.
+
+        Defaults to whatever the reasoning level configures. Subclasses override
+        when the agent has no prefetched corpus to fall back on and so must
+        search before it can answer. Forcing "required"/"any" here costs exactly
+        one tool round rather than pinning the loop: `execute_tool_loop` relaxes
+        it to "auto" after the first iteration so the model can still stop and
+        synthesize.
+        """
+        return level_settings.TOOL_CHOICE
+
+    def _force_tools_until(self) -> frozenset[str] | None:
+        """Tools that satisfy a forced tool_choice; None means any tool does."""
+        return None
+
+    def _max_tool_iterations(self, level_settings: DialecticLevelSettings) -> int:
+        """Tool rounds this query gets; defaults to the reasoning level's limit."""
+        return level_settings.MAX_TOOL_ITERATIONS
 
     async def _initialize_session_history(self) -> None:
         """Fetch and inject session history into the system prompt if configured."""
@@ -118,19 +190,20 @@ class DialecticAgent:
             token_limit=max_tokens,
             reverse=False,  # chronological order
         )
-        result = await self.db.execute(stmt)
-        messages = result.scalars().all()
+        async with tracked_db("dialectic.session_history", read_only=True) as db:
+            result = await db.execute(stmt)
+            messages = result.scalars().all()
 
-        if not messages:
-            return
+            if not messages:
+                return
 
-        # Format messages for injection
-        formatted_messages: list[str] = []
-        for msg in messages:
-            formatted = format_new_turn_with_timestamp(
-                msg.content, msg.created_at, msg.peer_name
-            )
-            formatted_messages.append(formatted)
+            # Format messages for injection (must access ORM attrs before session closes)
+            formatted_messages: list[str] = []
+            for msg in messages:
+                formatted = format_new_turn_with_timestamp(
+                    msg.content, msg.created_at, msg.peer_name
+                )
+                formatted_messages.append(formatted)
 
         session_history_section = (
             "\n\n## SESSION HISTORY\n\n"
@@ -169,12 +242,26 @@ class DialecticAgent:
         prefetch_limit = 10 if self.reasoning_level == "minimal" else 25
 
         try:
-            # Pre-compute embedding once for both searches
-            query_embedding = await embedding_client.embed(query)
+            # Pre-compute embedding once for both searches (no DB needed)
+            with embedding_call_purpose(
+                EmbeddingCallPurpose.DIALECTIC_PREFETCH.value,
+                workspace_name=self.workspace_name,
+                run_id=self._run_id,
+                parent_category="dialectic",
+                session_id=self.session_id,
+            ):
+                query_embedding = await embedding_client.embed(query)
 
-            # Search explicit observations separately
+            # Prefetched conclusions never pass through the tool executor, so
+            # they are recorded here or not at all -- and on a query that
+            # answers without a tool call they are the whole of what was read.
+            prefetched: list[models.Document] | None = (
+                [] if self.evidence is not None else None
+            )
+
+            # search_memory manages its own short-lived DB sessions so no
+            # connection is held during external vector-store calls.
             explicit_repr = await search_memory(
-                db=self.db,
                 workspace_name=self.workspace_name,
                 observer=self.observer,
                 observed=self.observed,
@@ -182,11 +269,11 @@ class DialecticAgent:
                 limit=prefetch_limit,
                 levels=["explicit"],
                 embedding=query_embedding,
+                session_allowlist=self.session_allowlist,
+                documents_out=prefetched,
             )
 
-            # Search derived observations separately
             derived_repr = await search_memory(
-                db=self.db,
                 workspace_name=self.workspace_name,
                 observer=self.observer,
                 observed=self.observed,
@@ -194,15 +281,18 @@ class DialecticAgent:
                 limit=prefetch_limit,
                 levels=["deductive", "inductive", "contradiction"],
                 embedding=query_embedding,
+                session_allowlist=self.session_allowlist,
+                documents_out=prefetched,
             )
 
             if explicit_repr.is_empty() and derived_repr.is_empty():
                 return None
 
-            # Count prefetched conclusions for telemetry
-            explicit_count = len(explicit_repr.explicit) + len(explicit_repr.deductive)
-            derived_count = len(derived_repr.explicit) + len(derived_repr.deductive)
-            self._prefetched_conclusion_count = explicit_count + derived_count
+            # Count prefetched conclusions for telemetry. `Representation.len()`
+            # sums all four levels (explicit/deductive/inductive/contradiction);
+            # the previous hand-sum dropped inductive + contradiction even
+            # though prefetch explicitly requests them.
+            self._prefetched_conclusion_count = explicit_repr.len() + derived_repr.len()
 
             # Format as two separate sections
             parts: list[str] = []
@@ -214,6 +304,12 @@ class DialecticAgent:
                 # Include IDs for derived so agent can use get_reasoning_chain
                 parts.append(derived_repr.format_as_markdown(include_ids=True))
 
+            # Recorded last: everything above can still fail into the handler
+            # below, which drops the whole block from the prompt. Evidence should
+            # name what the agent saw, not what was fetched for it.
+            if self.evidence is not None and prefetched:
+                self.evidence.add_documents(prefetched)
+
             return "\n".join(parts)
 
         except Exception as e:
@@ -221,19 +317,27 @@ class DialecticAgent:
             return None
 
     async def _prepare_query(
-        self, query: str
-    ) -> tuple[Callable[[str, dict[str, Any]], Any], str, str | None, float]:
+        self, query: str, telemetry: LLMTelemetryContext
+    ) -> tuple[
+        Callable[[str, dict[str, Any]], Any],
+        str,
+        str | None,
+        float,
+        CapturedAgentSpan | None,
+    ]:
         """
         Prepare common state for answering a query.
 
         Handles session history initialization, metrics setup, observation prefetching,
-        user message construction, and tool executor creation.
+        user message construction, and tool executor creation. Opens the run span
+        before prefetch; the caller ends it.
 
         Args:
             query: The question to answer about the peer
+            telemetry: Telemetry context for the run
 
         Returns:
-            A tuple of (tool_executor, task_name, run_id, start_time)
+            A tuple of (tool_executor, task_name, run_id, start_time, run)
         """
         await self._initialize_session_history()
 
@@ -241,10 +345,22 @@ class DialecticAgent:
         if self.metric_key:
             task_name = self.metric_key
         else:
-            run_id = str(uuid.uuid4())[:8]
+            run_id = generate_nanoid()
             task_name = f"dialectic_chat_{run_id}"
         start_time = time.perf_counter()
+        run = start_captured_span("run", telemetry, input=query)
+        try:
+            tool_executor = await self._prepare_messages(query, task_name)
+        except BaseException:
+            if run is not None:
+                run.end(is_error=True)
+            raise
+        return tool_executor, task_name, run_id, start_time, run
 
+    async def _prepare_messages(
+        self, query: str, task_name: str
+    ) -> Callable[[str, dict[str, Any]], Any]:
+        """Prefetch observations, append the user message, and build the tool executor."""
         accumulate_metric(
             task_name,
             "context",
@@ -264,9 +380,8 @@ class DialecticAgent:
         if prefetched_observations:
             user_content = (
                 f"Query: {query}\n\n"
-                f"## Relevant Observations (prefetched)\n"
-                f"The following observations were found to be semantically relevant to your query. "
-                f"Use these as primary context. You may still use tools to find additional information if needed.\n\n"
+                f"## {self._prefetch_heading()}\n"
+                f"{self._prefetch_intro()}\n\n"
                 f"{prefetched_observations}"
             )
             accumulate_metric(
@@ -277,21 +392,59 @@ class DialecticAgent:
 
         self.messages.append({"role": "user", "content": user_content})
 
-        tool_executor: Callable[
-            [str, dict[str, Any]], Any
-        ] = await create_tool_executor(
-            db=self.db,
+        return await self._create_tool_executor()
+
+    async def _create_tool_executor(self) -> Callable[[str, dict[str, Any]], Any]:
+        """Build the tool executor. Subclasses override to change tool scoping
+        (e.g. WorkspaceDialecticAgent uses the workspace executor)."""
+        return await create_tool_executor(
             workspace_name=self.workspace_name,
             session_name=self.session_name,
+            session_allowlist=self.session_allowlist,
             observer=self.observer,
             observed=self.observed,
             history_token_limit=settings.DIALECTIC.HISTORY_TOKEN_LIMIT,
             run_id=self._run_id,
             agent_type="dialectic",
             parent_category="dialectic",
+            evidence=self.evidence,
         )
 
-        return tool_executor, task_name, run_id, start_time
+    def _prefetch_heading(self) -> str:
+        """Heading for the prefetched block in the user message."""
+        return "Relevant Observations (prefetched)"
+
+    def _prefetch_intro(self) -> str:
+        """Sentence introducing the prefetched block in the user message."""
+        return (
+            "The following observations were found to be semantically relevant to your query. "
+            "Use these as primary context. You may still use tools to find additional information if needed."
+        )
+
+    def _telemetry_context(self, track_name: str | None = None) -> LLMTelemetryContext:
+        """Build the LLMTelemetryContext shared by answer() and answer_stream().
+
+        Carries the instance's `_run_id` (always set in __init__) + workspace +
+        peer identifiers so LLMCallCompletedEvent and 's
+        AgentIterationEvent can attribute every per-iteration LLM call back to
+        this dialectic invocation. `track_name` names the trace/step
+        (e.g. "Dialectic Agent" vs "Dialectic Agent Stream").
+        """
+        return LLMTelemetryContext(
+            workspace_name=self.workspace_name,
+            call_purpose="dialectic.answer",
+            parent_category="dialectic",
+            agent_type="dialectic",
+            run_id=self._run_id,
+            trace_id=self._run_id,
+            span_id=self._run_id,
+            session_id=self.session_id,
+            observer=self.observer,
+            observers=[self.observer],
+            observed=self.observed,
+            peer_name=self.observed,
+            track_name=track_name,
+        )
 
     def _log_response_metrics(
         self,
@@ -306,6 +459,7 @@ class DialecticAgent:
         tool_calls_count: int,
         thinking_content: str | None,
         iterations: int,
+        hit_input_token_cap: bool = False,
     ) -> None:
         """
         Log metrics common to both streaming and non-streaming responses.
@@ -374,10 +528,13 @@ class DialecticAgent:
                 output_tokens=output_tokens,
                 cache_read_tokens=cache_read_input_tokens or 0,
                 cache_creation_tokens=cache_creation_input_tokens or 0,
+                hit_input_token_cap=hit_input_token_cap,
             )
         )
 
-    async def answer(self, query: str) -> str:
+    async def answer(
+        self, query: str, response_model: type[BaseModel] | None = None
+    ) -> str:
         """
         Answer a query about the peer using agentic tool calling.
 
@@ -388,21 +545,21 @@ class DialecticAgent:
 
         Args:
             query: The question to answer about the peer
+            response_model: Optional Pydantic model the final synthesis must
+                conform to. When set, the returned string is JSON.
 
         Returns:
             The synthesized answer string
         """
-        tool_executor, task_name, run_id, start_time = await self._prepare_query(query)
+        telemetry = self._telemetry_context(track_name="Dialectic Agent")
+        tool_executor, task_name, run_id, start_time, run = await self._prepare_query(
+            query, telemetry
+        )
 
         # Get level-specific settings
         level_settings = settings.DIALECTIC.LEVELS[self.reasoning_level]
 
-        # Use minimal tools for minimal reasoning to reduce cost
-        tools = (
-            DIALECTIC_TOOLS_MINIMAL
-            if self.reasoning_level == "minimal"
-            else DIALECTIC_TOOLS
-        )
+        tools = self._select_tools()
         # Use level-specific max_output_tokens if set, otherwise global default
         max_tokens = (
             level_settings.MAX_OUTPUT_TOKENS
@@ -410,26 +567,52 @@ class DialecticAgent:
             else settings.DIALECTIC.MAX_OUTPUT_TOKENS
         )
 
-        response: HonchoLLMCallResponse[str] = await honcho_llm_call(
-            llm_settings=level_settings,
-            prompt="",  # Ignored since we pass messages
-            max_tokens=max_tokens,
-            tools=tools,
-            tool_choice=level_settings.TOOL_CHOICE,
-            tool_executor=tool_executor,
-            max_tool_iterations=level_settings.MAX_TOOL_ITERATIONS,
-            messages=self.messages,
-            track_name="Dialectic Agent",
-            thinking_budget_tokens=level_settings.THINKING_BUDGET_TOKENS,
-            max_input_tokens=settings.DIALECTIC.MAX_INPUT_TOKENS,
-            trace_name="dialectic_chat",
-        )
+        try:
+            # cast: `type[BaseModel] | None` matches neither the parsed nor the
+            # plain-text overload statically, so pyright resolves the stream
+            # overload — but without stream=True the call is non-streaming.
+            response = cast(  # pyright: ignore[reportInvalidCast]
+                HonchoLLMCallResponse[Any],
+                await honcho_llm_call(
+                    model_config=_get_dialectic_level_model_config(
+                        self.reasoning_level
+                    ),
+                    prompt="",  # Ignored since we pass messages
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    tool_choice=self._tool_choice(level_settings),
+                    force_tools_until=self._force_tools_until(),
+                    tool_executor=tool_executor,
+                    max_tool_iterations=self._max_tool_iterations(level_settings),
+                    messages=self.messages,
+                    max_input_tokens=settings.DIALECTIC.MAX_INPUT_TOKENS,
+                    trace_name="dialectic_chat",
+                    telemetry=telemetry,
+                    response_model=response_model,
+                    run=run,
+                ),
+            )
+        except BaseException:
+            if run is not None:
+                run.end(is_error=True)
+            raise
+
+        # With response_model, the backend parses content into a model
+        # instance; the API contract is a JSON string.
+        content = response.content
+        if isinstance(content, BaseModel):
+            content = content.model_dump_json(by_alias=True)
+        if run is not None:
+            run.end(output=content)
+
+        if self.evidence is not None:
+            self.evidence.record_tool_calls(response.tool_calls_made)
 
         self._log_response_metrics(
             task_name=task_name,
             run_id=run_id,
             start_time=start_time,
-            response_content=response.content,
+            response_content=content,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             cache_read_input_tokens=response.cache_read_input_tokens,
@@ -437,11 +620,14 @@ class DialecticAgent:
             tool_calls_count=len(response.tool_calls_made),
             thinking_content=response.thinking_content,
             iterations=response.iterations,
+            hit_input_token_cap=response.hit_input_token_cap,
         )
 
-        return response.content
+        return content
 
-    async def answer_stream(self, query: str) -> AsyncIterator[str]:
+    async def answer_stream(
+        self, query: str, response_model: type[BaseModel] | None = None
+    ) -> AsyncIterator[str]:
         """
         Answer a query about the peer using agentic tool calling, streaming the response.
 
@@ -452,21 +638,22 @@ class DialecticAgent:
 
         Args:
             query: The question to answer about the peer
+            response_model: Optional Pydantic model the final synthesis must
+                conform to. When set, the streamed text accumulates to JSON
+                (chunks are raw text; no parsing happens on the stream path).
 
         Yields:
             Chunks of the response text as they are generated
         """
-        tool_executor, task_name, run_id, start_time = await self._prepare_query(query)
+        telemetry = self._telemetry_context(track_name="Dialectic Agent Stream")
+        tool_executor, task_name, run_id, start_time, run = await self._prepare_query(
+            query, telemetry
+        )
 
         # Get level-specific settings
         level_settings = settings.DIALECTIC.LEVELS[self.reasoning_level]
 
-        # Use minimal tools for minimal reasoning to reduce cost
-        tools = (
-            DIALECTIC_TOOLS_MINIMAL
-            if self.reasoning_level == "minimal"
-            else DIALECTIC_TOOLS
-        )
+        tools = self._select_tools()
         # Use level-specific max_output_tokens if set, otherwise global default
         max_tokens = (
             level_settings.MAX_OUTPUT_TOKENS
@@ -474,31 +661,46 @@ class DialecticAgent:
             else settings.DIALECTIC.MAX_OUTPUT_TOKENS
         )
 
-        response = cast(
-            StreamingResponseWithMetadata,
-            await honcho_llm_call(
-                llm_settings=level_settings,
-                prompt="",  # Ignored since we pass messages
-                max_tokens=max_tokens,
-                stream=True,
-                stream_final_only=True,
-                tools=tools,
-                tool_choice=level_settings.TOOL_CHOICE,
-                tool_executor=tool_executor,
-                max_tool_iterations=level_settings.MAX_TOOL_ITERATIONS,
-                messages=self.messages,
-                track_name="Dialectic Agent Stream",
-                thinking_budget_tokens=level_settings.THINKING_BUDGET_TOKENS,
-                max_input_tokens=settings.DIALECTIC.MAX_INPUT_TOKENS,
-                trace_name="dialectic_chat",
-            ),
-        )
-
         accumulated_content: list[str] = []
-        async for chunk in response:
-            if chunk.content:
-                accumulated_content.append(chunk.content)
-                yield chunk.content
+        is_error = False
+        try:
+            response = cast(
+                StreamingResponseWithMetadata,
+                await honcho_llm_call(
+                    model_config=_get_dialectic_level_model_config(
+                        self.reasoning_level
+                    ),
+                    prompt="",  # Ignored since we pass messages
+                    max_tokens=max_tokens,
+                    stream=True,
+                    stream_final_only=True,
+                    tools=tools,
+                    tool_choice=self._tool_choice(level_settings),
+                    force_tools_until=self._force_tools_until(),
+                    tool_executor=tool_executor,
+                    max_tool_iterations=self._max_tool_iterations(level_settings),
+                    messages=self.messages,
+                    max_input_tokens=settings.DIALECTIC.MAX_INPUT_TOKENS,
+                    trace_name="dialectic_chat",
+                    telemetry=telemetry,
+                    response_model=response_model,
+                    run=run,
+                ),
+            )
+
+            async for chunk in response:
+                if chunk.content:
+                    accumulated_content.append(chunk.content)
+                    yield chunk.content
+        except BaseException as exc:
+            is_error = not isinstance(exc, GeneratorExit)
+            raise
+        finally:
+            if run is not None:
+                run.end(output="".join(accumulated_content) or None, is_error=is_error)
+
+        if self.evidence is not None:
+            self.evidence.record_tool_calls(response.tool_calls_made)
 
         self._log_response_metrics(
             task_name=task_name,
@@ -512,4 +714,5 @@ class DialecticAgent:
             tool_calls_count=len(response.tool_calls_made),
             thinking_content=response.thinking_content,
             iterations=response.iterations,
+            hit_input_token_cap=response.hit_input_token_cap,
         )

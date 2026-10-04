@@ -3,6 +3,9 @@ import type { HonchoHTTPClient } from './http/client'
 import { Message } from './message'
 import { Page } from './pagination'
 import { Peer } from './peer'
+// Type-only: scope.ts imports this module. Importing the type keeps that cycle
+// out of the emitted JS.
+import type { Scope } from './scope'
 import { SessionContext, SessionSummaries } from './session_context'
 import type {
   MessageResponse,
@@ -17,7 +20,7 @@ import type {
   SessionResponse,
   SessionSummariesResponse,
 } from './types/api'
-import { transformQueueStatus } from './utils'
+import { resolveId, transformQueueStatus } from './utils'
 import {
   ContextParamsSchema,
   FileUploadSchema,
@@ -28,10 +31,14 @@ import {
   type MessageAddition,
   MessageAdditionToApiSchema,
   MessageMetadataSchema,
+  messageConfigToApi,
+  normalizeListOptions,
+  normalizeSearchQuery,
   type PeerAddition,
   PeerAdditionToApiSchema,
   type PeerRemoval,
   PeerRemovalSchema,
+  peerConfigFromApi,
   type QueueStatusOptions,
   SearchQuerySchema,
   type SessionConfig,
@@ -79,6 +86,8 @@ export class Session {
   private _http: HonchoHTTPClient
   private _metadata?: Record<string, unknown>
   private _configuration?: SessionConfig
+  private _createdAt?: string
+  private _isActive?: boolean
   private _ensureWorkspace: () => Promise<void>
 
   /**
@@ -104,6 +113,20 @@ export class Session {
   }
 
   /**
+   * Timestamp when this session was created. Only available if fetched from the API.
+   */
+  get createdAt(): string | undefined {
+    return this._createdAt
+  }
+
+  /**
+   * Whether this session is active. Only available if fetched from the API.
+   */
+  get isActive(): boolean | undefined {
+    return this._isActive
+  }
+
+  /**
    * Initialize a new Session. **Do not call this directly, use the client.session() method instead.**
    *
    * @param id - Unique identifier for this session within the workspace
@@ -118,7 +141,9 @@ export class Session {
     http: HonchoHTTPClient,
     metadata?: Record<string, unknown>,
     configuration?: SessionConfig,
-    ensureWorkspace: () => Promise<void> = async () => undefined
+    ensureWorkspace: () => Promise<void> = async () => undefined,
+    createdAt?: string,
+    isActive?: boolean
   ) {
     this.id = id
     this.workspaceId = workspaceId
@@ -126,6 +151,15 @@ export class Session {
     this._metadata = metadata
     this._configuration = configuration
     this._ensureWorkspace = ensureWorkspace
+    this._createdAt = createdAt
+    this._isActive = isActive
+  }
+
+  private _applySessionResponse(session: SessionResponse): void {
+    this._metadata = session.metadata || {}
+    this._configuration = sessionConfigFromApi(session.configuration) || {}
+    this._createdAt = session.created_at
+    this._isActive = session.is_active
   }
 
   // ===========================================================================
@@ -189,6 +223,8 @@ export class Session {
     search_query?: string
     peer_target?: string
     peer_perspective?: string
+    scope?: string
+    sessions?: string[]
     limit_to_session?: boolean
     search_top_k?: number
     search_max_distance?: number
@@ -305,13 +341,18 @@ export class Session {
     filters?: Record<string, unknown>
     page?: number
     size?: number
+    reverse?: boolean
   }): Promise<PageResponse<MessageResponse>> {
     await this._ensureWorkspace()
     return this._http.post<PageResponse<MessageResponse>>(
       `/${API_VERSION}/workspaces/${this.workspaceId}/sessions/${this.id}/messages/list`,
       {
         body: { filters: params?.filters },
-        query: { page: params?.page, size: params?.size },
+        query: {
+          page: params?.page,
+          size: params?.size,
+          reverse: params?.reverse ? 'true' : undefined,
+        },
       }
     )
   }
@@ -355,6 +396,13 @@ export class Session {
     return this._http.post<RepresentationResponse>(
       `/${API_VERSION}/workspaces/${this.workspaceId}/peers/${peerId}/representation`,
       { body: params }
+    )
+  }
+
+  private async _getMessage(messageId: string): Promise<MessageResponse> {
+    await this._ensureWorkspace()
+    return this._http.get<MessageResponse>(
+      `/${API_VERSION}/workspaces/${this.workspaceId}/sessions/${this.id}/messages/${messageId}`
     )
   }
 
@@ -450,9 +498,10 @@ export class Session {
           peer.id,
           this.workspaceId,
           this._http,
-          undefined,
-          undefined,
-          () => this._ensureWorkspace()
+          peer.metadata ?? undefined,
+          peerConfigFromApi(peer.configuration) ?? undefined,
+          () => this._ensureWorkspace(),
+          peer.created_at
         )
     )
   }
@@ -539,19 +588,48 @@ export class Session {
    *
    * Makes an API call to retrieve messages in the session, with optional filtering.
    *
-   * @param filters - Optional filter criteria for messages. See
-   *                  [search filters documentation](https://docs.honcho.dev/v3/documentation/core-concepts/features/using-filters).
+   * @param options - Either a legacy raw filter object or an options object with
+   *                  `filters`, `page`, `size`, and `reverse`. See
+   *                  [search filters documentation](https://honcho.dev/docs/v3/documentation/core-concepts/features/using-filters).
    * @returns Promise resolving to a paginated Page of Message objects
    */
-  async messages(filters?: Filters): Promise<Page<Message, MessageResponse>> {
-    const validatedFilter = filters ? FilterSchema.parse(filters) : undefined
-    const messagesPage = await this._listMessages({ filters: validatedFilter })
+  async messages(
+    options?:
+      | Filters
+      | {
+          filters?: Filters
+          page?: number
+          size?: number
+          reverse?: boolean
+        }
+  ): Promise<Page<Message, MessageResponse>> {
+    const normalizedOptions = normalizeListOptions(options, [
+      'filters',
+      'page',
+      'size',
+      'reverse',
+    ])
+    const validatedFilter = normalizedOptions.filters
+      ? FilterSchema.parse(normalizedOptions.filters)
+      : undefined
+    const reverse = normalizedOptions.reverse
+    const messagesPage = await this._listMessages({
+      filters: validatedFilter,
+      page: normalizedOptions.page,
+      size: normalizedOptions.size,
+      reverse,
+    })
 
     const fetchNextPage = async (
       page: number,
       size: number
     ): Promise<PageResponse<MessageResponse>> => {
-      return this._listMessages({ filters: validatedFilter, page, size })
+      return this._listMessages({
+        filters: validatedFilter,
+        page,
+        size,
+        reverse,
+      })
     }
 
     return new Page(messagesPage, Message.fromApiResponse, fetchNextPage)
@@ -568,8 +646,8 @@ export class Session {
    */
   async getMetadata(): Promise<Record<string, unknown>> {
     const session = await this._getOrCreate({ id: this.id })
-    this._metadata = session.metadata || {}
-    return this._metadata
+    this._applySessionResponse(session)
+    return this._metadata ?? {}
   }
 
   /**
@@ -599,8 +677,8 @@ export class Session {
    */
   async getConfiguration(): Promise<SessionConfig> {
     const session = await this._getOrCreate({ id: this.id })
-    this._configuration = sessionConfigFromApi(session.configuration) || {}
-    return this._configuration
+    this._applySessionResponse(session)
+    return this._configuration ?? {}
   }
 
   /**
@@ -627,8 +705,7 @@ export class Session {
    */
   async refresh(): Promise<void> {
     const session = await this._getOrCreate({ id: this.id })
-    this._metadata = session.metadata || {}
-    this._configuration = sessionConfigFromApi(session.configuration) || {}
+    this._applySessionResponse(session)
   }
 
   /**
@@ -662,7 +739,9 @@ export class Session {
       this._http,
       clonedSessionData.metadata ?? undefined,
       sessionConfigFromApi(clonedSessionData.configuration) ?? undefined,
-      () => this._ensureWorkspace()
+      () => this._ensureWorkspace(),
+      clonedSessionData.created_at,
+      clonedSessionData.is_active
     )
   }
 
@@ -677,10 +756,20 @@ export class Session {
    * @param options.summary - Whether to include a summary of earlier messages
    * @param options.tokens - Target token count for the context window
    * @param options.peerTarget - The peer to get representation for
-   * @param options.lastUserMessage - Message text (string) or Message object whose content will be used for semantic search
    * @param options.peerPerspective - The peer whose perspective to use for representation
+   * @param options.scope - A scope to use as the perspective source instead of a peer: the
+   *                        target's representation and card are read from what that scope
+   *                        observed. Requires `peerTarget`, is mutually exclusive with
+   *                        `peerPerspective`, and requires a workspace-level key.
+   * @param options.sessions - Allowlist of sessions confining the target's representation
+   *                           to that set. This session must be one of them. Recall is
+   *                           limited to conclusions stated directly in those sessions, and
+   *                           the peer card is omitted, since neither derived conclusions
+   *                           nor cards carry provable per-session provenance. Mutually
+   *                           exclusive with `scope` and `limitToSession`; requires
+   *                           `peerTarget`.
    * @param options.limitToSession - Whether to limit representation to this session only
-   * @param options.representationOptions - Options for representation retrieval
+   * @param options.representationOptions - Options for representation retrieval (searchQuery, searchTopK, etc.)
    * @returns Promise resolving to a SessionContext with messages, summary, and representation
    *
    * @example
@@ -691,6 +780,12 @@ export class Session {
    *   peerTarget: user
    * })
    *
+   * // Build the context from what a scope observed
+   * const ctx = await session.context({
+   *   peerTarget: user,
+   *   scope: 'therapy',
+   * })
+   *
    * // Convert to OpenAI format
    * const messages = ctx.toOpenAI(assistant)
    * ```
@@ -699,8 +794,9 @@ export class Session {
     summary?: boolean
     tokens?: number
     peerTarget?: string | Peer
-    searchQuery?: string | Message
     peerPerspective?: string | Peer
+    scope?: string | Scope
+    sessions?: (string | Session)[]
     limitToSession?: boolean
     representationOptions?: RepresentationOptions
   }): Promise<SessionContext> {
@@ -713,32 +809,37 @@ export class Session {
       typeof opts.peerPerspective === 'object'
         ? opts.peerPerspective.id
         : opts.peerPerspective
-    const searchQueryText =
-      typeof opts.searchQuery === 'string'
-        ? opts.searchQuery
-        : opts.searchQuery?.content
+
+    const searchQuery = normalizeSearchQuery(
+      opts.representationOptions?.searchQuery
+    )
 
     const contextParams = ContextParamsSchema.parse({
       summary: opts.summary,
       tokens: opts.tokens,
       peerTarget: peerTargetId,
-      searchQuery: searchQueryText,
       peerPerspective: peerPerspectiveId,
+      // Checked against undefined, not truthiness: `scope: ''` must reach the
+      // schema and be rejected, not be dropped into an unscoped context.
+      scope: opts.scope !== undefined ? resolveId(opts.scope) : undefined,
+      sessions: opts.sessions,
       limitToSession: opts.limitToSession,
-      representationOptions: opts.representationOptions,
+      representationOptions: opts.representationOptions
+        ? {
+            ...opts.representationOptions,
+            searchQuery,
+          }
+        : undefined,
     })
-
-    const searchQueryParsed =
-      typeof contextParams.searchQuery === 'string'
-        ? contextParams.searchQuery
-        : contextParams.searchQuery?.content
 
     const context = await this._getContext({
       tokens: contextParams.tokens,
       summary: contextParams.summary,
-      search_query: searchQueryParsed,
+      search_query: searchQuery,
       peer_target: contextParams.peerTarget,
       peer_perspective: contextParams.peerPerspective,
+      scope: contextParams.scope,
+      sessions: contextParams.sessions,
       limit_to_session: contextParams.limitToSession,
       search_top_k: contextParams.representationOptions?.searchTopK,
       search_max_distance:
@@ -772,7 +873,7 @@ export class Session {
    * @param query - The search query to use
    * @param options - Search options
    * @param options.filters - Optional filters to scope the search. See
-   *                          [search filters documentation](https://docs.honcho.dev/v3/documentation/core-concepts/features/using-filters).
+   *                          [search filters documentation](https://honcho.dev/docs/v3/documentation/core-concepts/features/using-filters).
    * @param options.limit - Number of results to return (1-100, default: 10)
    * @returns Promise resolving to an array of Message objects matching the query
    */
@@ -895,14 +996,15 @@ export class Session {
     })
 
     const formData = new FormData()
+    const uploadFile = uploadParams.file
 
-    if (file instanceof File || file instanceof Blob) {
-      formData.append('file', file)
+    if (uploadFile instanceof Blob) {
+      formData.append('file', uploadFile)
     } else {
       // Convert to Uint8Array for Blob compatibility
-      const content = new Uint8Array(file.content)
-      const blob = new Blob([content], { type: file.content_type })
-      formData.append('file', blob, file.filename)
+      const content = new Uint8Array(uploadFile.content)
+      const blob = new Blob([content], { type: uploadFile.content_type })
+      formData.append('file', blob, uploadFile.filename)
     }
 
     formData.append('peer_id', resolvedPeerId)
@@ -913,10 +1015,8 @@ export class Session {
       uploadParams.configuration !== undefined &&
       uploadParams.configuration !== null
     ) {
-      formData.append(
-        'configuration',
-        JSON.stringify(uploadParams.configuration)
-      )
+      const apiConfiguration = messageConfigToApi(uploadParams.configuration)
+      formData.append('configuration', JSON.stringify(apiConfiguration))
     }
     if (
       uploadParams.createdAt !== undefined &&
@@ -949,18 +1049,19 @@ export class Session {
     peer: string | Peer,
     options?: {
       target?: string | Peer
-      searchQuery?: string
+      searchQuery?: string | Message
       searchTopK?: number
       searchMaxDistance?: number
       includeMostFrequent?: boolean
       maxConclusions?: number
     }
   ): Promise<string> {
+    const searchQuery = normalizeSearchQuery(options?.searchQuery)
     const getRepresentationParams = GetRepresentationParamsSchema.parse({
       peer,
       target: options?.target,
       options: {
-        searchQuery: options?.searchQuery,
+        searchQuery,
         searchTopK: options?.searchTopK,
         searchMaxDistance: options?.searchMaxDistance,
         includeMostFrequent: options?.includeMostFrequent,
@@ -980,7 +1081,7 @@ export class Session {
     const response = await this._getRepresentation(peerId, {
       session_id: this.id,
       target: targetId,
-      search_query: getRepresentationParams.options?.searchQuery,
+      search_query: searchQuery,
       search_top_k: getRepresentationParams.options?.searchTopK,
       search_max_distance: getRepresentationParams.options?.searchMaxDistance,
       include_most_frequent:
@@ -988,6 +1089,17 @@ export class Session {
       max_conclusions: getRepresentationParams.options?.maxConclusions,
     })
     return response.representation
+  }
+
+  /**
+   * Get a single message by ID from this session.
+   *
+   * @param messageId - The ID of the message to retrieve
+   * @returns Promise resolving to the Message object
+   */
+  async getMessage(messageId: string): Promise<Message> {
+    const response = await this._getMessage(messageId)
+    return Message.fromApiResponse(response)
   }
 
   /**

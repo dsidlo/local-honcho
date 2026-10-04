@@ -51,7 +51,7 @@ ALEMBIC_TEST_DB_STR: str = _render_for_configparser(ALEMBIC_TEST_DB_URL)
 
 
 @pytest.fixture(scope="session", autouse=True)
-def configure_alembic_settings(alembic_database: str) -> Generator[None, None, None]:
+def configure_alembic_settings(alembic_database: str) -> Generator[None]:
     """Point application settings at the Alembic test database."""
 
     previous_uri = settings.DB.CONNECTION_URI
@@ -78,7 +78,7 @@ def alembic_cfg(alembic_database: str) -> Config:
 
 
 @pytest.fixture(scope="session")
-def alembic_database() -> Generator[str, None, None]:
+def alembic_database() -> Generator[str]:
     """Provision a dedicated DB for Alembic verification tests."""
 
     assert ALEMBIC_TEST_DB_URL.database == "alembic_migration_tests", (
@@ -103,7 +103,7 @@ def alembic_database() -> Generator[str, None, None]:
 
 
 @pytest.fixture
-def alembic_engine(alembic_database: str) -> Generator[Engine, None, None]:
+def alembic_engine(alembic_database: str) -> Generator[Engine]:
     """Yield an engine bound to the Alembic test database."""
 
     engine = create_engine(alembic_database, pool_pre_ping=True)
@@ -116,7 +116,7 @@ def alembic_engine(alembic_database: str) -> Generator[Engine, None, None]:
 @pytest.fixture(autouse=True)
 def reset_schema_between_tests(
     alembic_engine: Engine,
-) -> Generator[None, None, None]:
+) -> Generator[None]:
     """Drop and recreate the schema for a clean slate each test (fast reset)."""
 
     schema = settings.DB.SCHEMA

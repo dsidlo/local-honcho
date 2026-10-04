@@ -6,12 +6,13 @@ from __future__ import annotations
 import datetime
 import logging
 import warnings
-from collections.abc import Generator
-from typing import TYPE_CHECKING, Any, Literal
+from collections.abc import Generator, Sequence
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
-from pydantic import ConfigDict, Field, PrivateAttr, validate_call
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, validate_call
 
 from .api_types import (
+    Evidence,
     MessageCreateParams,
     MessageResponse,
     PeerCardResponse,
@@ -19,16 +20,23 @@ from .api_types import (
     PeerContextResponse,
     PeerResponse,
     RepresentationResponse,
+    SessionConfiguration,
     SessionResponse,
 )
-from .base import PeerBase, SessionBase
-from .conclusions import ConclusionScope
+from .base import PeerBase, ScopeBase, SessionBase
+from .conclusions import ConclusionsView
 from .http import routes
 from .message import Message
 from .mixins import MetadataConfigMixin
 from .pagination import SyncPage
-from .types import DialecticStreamResponse
-from .utils import parse_datetime, parse_sse_stream, resolve_id
+from .types import ChatResponse, DialecticStreamResponse
+from .utils import (
+    SSEStreamParser,
+    parse_datetime,
+    parse_sse_stream,
+    resolve_id,
+    scope_recall_fields,
+)
 
 if TYPE_CHECKING:
     from .aio import PeerAio
@@ -36,6 +44,54 @@ if TYPE_CHECKING:
     from .session import Session
 
 logger = logging.getLogger(__name__)
+
+TResponseFormat = TypeVar("TResponseFormat", bound=BaseModel)
+
+
+def serialize_response_format(
+    response_format: type[BaseModel] | dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Convert a chat response_format argument to a JSON Schema dict."""
+    if response_format is None:
+        return None
+    if isinstance(response_format, type):
+        return response_format.model_json_schema()
+    return response_format
+
+
+def parse_chat_response(
+    data: dict[str, Any],
+    response_format: type[BaseModel] | dict[str, Any] | None,
+    include_evidence: bool,
+) -> ChatResponse[Any] | BaseModel | str | None:
+    """Read a chat response body into whatever the caller asked for.
+
+    Shared by peer and workspace chat, sync and async, so the four stay in
+    step. Without evidence the answer is returned bare; with it, the answer and
+    its evidence come back together. An empty answer
+    stays falsy either way -- as `None`, or as a `ChatResponse` whose content
+    is None -- so evidence is still available for a run that found nothing to
+    say.
+    """
+    content = data.get("content")
+    parsed: BaseModel | str | None = None
+    if content:
+        parsed = (
+            response_format.model_validate_json(content)
+            if isinstance(response_format, type)
+            else content
+        )
+
+    if not include_evidence:
+        return parsed
+
+    raw_evidence = data.get("evidence")
+    return ChatResponse(
+        content=parsed,
+        evidence=Evidence.model_validate(raw_evidence)
+        if isinstance(raw_evidence, dict)
+        else None,
+    )
 
 
 class Peer(PeerBase, MetadataConfigMixin):
@@ -57,6 +113,7 @@ class Peer(PeerBase, MetadataConfigMixin):
 
     _metadata: dict[str, object] | None = PrivateAttr(default=None)
     _configuration: PeerConfig | None = PrivateAttr(default=None)
+    _created_at: datetime.datetime | None = PrivateAttr(default=None)
     _honcho: "Honcho" = PrivateAttr()
 
     @property
@@ -68,6 +125,11 @@ class Peer(PeerBase, MetadataConfigMixin):
     def configuration(self) -> PeerConfig | None:
         """Cached configuration for this peer. May be stale. Use get_configuration() for fresh data."""
         return self._configuration
+
+    @property
+    def created_at(self) -> datetime.datetime | None:
+        """Timestamp when this peer was created. Only available if fetched from the API."""
+        return self._created_at
 
     # MetadataConfigMixin implementation
     def _get_http_client(self):
@@ -90,6 +152,21 @@ class Peer(PeerBase, MetadataConfigMixin):
         # Return configuration as dict for mixin compatibility
         return peer.metadata or {}, peer.configuration.model_dump(exclude_none=True)
 
+    def _apply_peer_response(self, peer: PeerResponse) -> None:
+        self._metadata = peer.metadata or {}
+        self._configuration = peer.configuration
+        self._created_at = peer.created_at
+
+    def get_metadata(self) -> dict[str, object]:
+        """Get metadata from the server and update the cache."""
+        self._honcho._ensure_workspace()
+        data = self._get_http_client().post(
+            self._get_fetch_route(), body=self._get_fetch_body()
+        )
+        peer = PeerResponse.model_validate(data)
+        self._apply_peer_response(peer)
+        return self._metadata or {}
+
     def get_configuration(self) -> PeerConfig:  # pyright: ignore[reportIncompatibleMethodOverride]
         """
         Get configuration from the server and update the cache.
@@ -102,9 +179,17 @@ class Peer(PeerBase, MetadataConfigMixin):
             self._get_fetch_route(), body=self._get_fetch_body()
         )
         peer = PeerResponse.model_validate(data)
-        self._metadata = peer.metadata or {}
-        self._configuration = peer.configuration
-        return self._configuration
+        self._apply_peer_response(peer)
+        return self._configuration or PeerConfig()
+
+    def refresh(self) -> None:
+        """Refresh cached metadata, configuration, and created_at from the server."""
+        self._honcho._ensure_workspace()
+        data = self._get_http_client().post(
+            self._get_fetch_route(), body=self._get_fetch_body()
+        )
+        peer = PeerResponse.model_validate(data)
+        self._apply_peer_response(peer)
 
     @validate_call
     def set_configuration(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -163,6 +248,10 @@ class Peer(PeerBase, MetadataConfigMixin):
             None,
             description="Optional configuration to set for this peer. If set, will get/create peer immediately with flags.",
         ),
+        created_at: datetime.datetime | None = Field(
+            None,
+            description="Timestamp when this peer was created.",
+        ),
     ) -> None:
         """
         Initialize a new Peer.
@@ -184,21 +273,72 @@ class Peer(PeerBase, MetadataConfigMixin):
         )
         self._honcho = honcho
         self._metadata = metadata
-        self._configuration = configuration
+        self._configuration = configuration  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._created_at = created_at
 
-        if configuration is not None or metadata is not None:
-            self._honcho._ensure_workspace()
-            body: dict[str, Any] = {"id": peer_id}
-            if metadata is not None:
-                body["metadata"] = metadata
-            if configuration is not None:
-                body["configuration"] = configuration.model_dump(exclude_none=True)
+    @overload
+    def chat(
+        self,
+        query: str,
+        *,
+        target: str | PeerBase | None = None,
+        session: str | SessionBase | None = None,
+        scope: str | ScopeBase | Sequence[str | ScopeBase] | None = None,
+        sessions: Sequence[str | SessionBase] | None = None,
+        reasoning_level: Literal["minimal", "low", "medium", "high", "max"]
+        | None = None,
+        response_format: type[TResponseFormat],
+        include_evidence: Literal[False] = False,
+        timeout: float | None = None,
+    ) -> TResponseFormat | None: ...
 
-            data = honcho._http.post(routes.peers(honcho.workspace_id), body=body)
-            peer_data = PeerResponse.model_validate(data)
-            # Update cached values with API response
-            self._metadata = peer_data.metadata
-            self._configuration = peer_data.configuration  # pyright: ignore[reportIncompatibleVariableOverride]
+    @overload
+    def chat(
+        self,
+        query: str,
+        *,
+        target: str | PeerBase | None = None,
+        session: str | SessionBase | None = None,
+        scope: str | ScopeBase | Sequence[str | ScopeBase] | None = None,
+        sessions: Sequence[str | SessionBase] | None = None,
+        reasoning_level: Literal["minimal", "low", "medium", "high", "max"]
+        | None = None,
+        response_format: type[TResponseFormat],
+        include_evidence: Literal[True],
+        timeout: float | None = None,
+    ) -> ChatResponse[TResponseFormat]: ...
+
+    @overload
+    def chat(
+        self,
+        query: str,
+        *,
+        target: str | PeerBase | None = None,
+        session: str | SessionBase | None = None,
+        scope: str | ScopeBase | Sequence[str | ScopeBase] | None = None,
+        sessions: Sequence[str | SessionBase] | None = None,
+        reasoning_level: Literal["minimal", "low", "medium", "high", "max"]
+        | None = None,
+        response_format: dict[str, Any] | None = None,
+        include_evidence: Literal[True],
+        timeout: float | None = None,
+    ) -> ChatResponse[str]: ...
+
+    @overload
+    def chat(
+        self,
+        query: str,
+        *,
+        target: str | PeerBase | None = None,
+        session: str | SessionBase | None = None,
+        scope: str | ScopeBase | Sequence[str | ScopeBase] | None = None,
+        sessions: Sequence[str | SessionBase] | None = None,
+        reasoning_level: Literal["minimal", "low", "medium", "high", "max"]
+        | None = None,
+        response_format: dict[str, Any] | None = None,
+        include_evidence: Literal[False] = False,
+        timeout: float | None = None,
+    ) -> str | None: ...
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def chat(
@@ -207,9 +347,16 @@ class Peer(PeerBase, MetadataConfigMixin):
         *,
         target: str | PeerBase | None = None,
         session: str | SessionBase | None = None,
+        scope: str | ScopeBase | Sequence[str | ScopeBase] | None = None,
+        sessions: Sequence[str | SessionBase] | None = None,
         reasoning_level: Literal["minimal", "low", "medium", "high", "max"]
         | None = None,
-    ) -> str | None:
+        response_format: type[BaseModel] | dict[str, Any] | None = None,
+        include_evidence: bool = False,
+        timeout: float | None = Field(
+            None, gt=0, description="Timeout in seconds for this chat request"
+        ),
+    ) -> ChatResponse[Any] | BaseModel | str | None:
         """
         Query the peer's representation with a natural language question.
 
@@ -226,32 +373,73 @@ class Peer(PeerBase, MetadataConfigMixin):
             session: Optional session to scope the query to. If provided, only
                      information from that session is considered. Can be a session
                      ID string or a Session object.
+            scope: Optional scope(s) to confine the query to. A single scope answers
+                   from that scope's own view of the target, including the
+                   higher-order conclusions reasoned within it. A sequence of scopes
+                   restricts recall to the union of their member sessions, which —
+                   like ``sessions`` — yields only directly-stated conclusions.
+                   Mutually exclusive with ``session`` and ``sessions``, and requires
+                   a workspace-level key.
+            sessions: Optional allowlist of sessions to confine the query to, for
+                      one-off questions spanning a handful of sessions. Recall is
+                      limited to conclusions stated directly in those sessions:
+                      conclusions produced by reasoning across sessions are excluded,
+                      because their provenance cannot be proven to sit inside the
+                      allowlist. Reach for a named ``scope`` when you need that depth.
             reasoning_level: Optional reasoning level for the query: "minimal", "low", "medium",
                              "high", or "max". Defaults to "low" if not provided.
+            response_format: Optional structure for the answer. Pass a Pydantic
+                             model class to get a parsed instance back, or a raw
+                             JSON Schema dict (root type "object") to get the
+                             answer as a JSON string.
+            include_evidence: When True, returns a ``ChatResponse`` carrying the
+                     answer alongside what the dialectic read to produce it.
+                     Evidence is collated from the agent's own reads rather
+                     than reported by the model, so it is broader than a
+                     citation list: a conclusion appears because the agent saw
+                     it, not as proof the answer relied on it.
+            timeout: Optional timeout in seconds for each HTTP attempt made by
+                     this request. When omitted, the Honcho client's configured
+                     timeout is used. Retries can extend total elapsed time.
 
         Returns:
-            Response string containing the answer, or None if no relevant information
+            Response string containing the answer (a JSON string when a schema
+            dict was given), a parsed model instance when a Pydantic model class
+            was given, or None if no relevant information. With
+            ``include_evidence=True``, a ``ChatResponse`` wrapping that same
+            content plus its evidence.
+
+        Raises:
+            ValueError: If ``scope`` is combined with ``session`` or ``sessions``.
         """
         self._honcho._ensure_workspace()
         target_id = resolve_id(target)
         resolved_session_id = resolve_id(session)
 
         body: dict[str, Any] = {"query": query, "stream": False}
+        body.update(
+            scope_recall_fields(
+                scope=scope, sessions=sessions, session_id=resolved_session_id
+            )
+        )
         if target_id:
             body["target"] = target_id
         if resolved_session_id:
             body["session_id"] = resolved_session_id
         if reasoning_level:
             body["reasoning_level"] = reasoning_level
+        response_format_schema = serialize_response_format(response_format)
+        if response_format_schema is not None:
+            body["response_format"] = response_format_schema
+        if include_evidence:
+            body["include_evidence"] = True
 
         data = self._honcho._http.post(
             routes.peer_chat(self.workspace_id, self.id),
             body=body,
+            timeout=timeout,
         )
-        content = data.get("content")
-        if not content:
-            return None
-        return content
+        return parse_chat_response(data, response_format, include_evidence)
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def chat_stream(
@@ -260,8 +448,12 @@ class Peer(PeerBase, MetadataConfigMixin):
         *,
         target: str | PeerBase | None = None,
         session: str | SessionBase | None = None,
+        scope: str | ScopeBase | Sequence[str | ScopeBase] | None = None,
+        sessions: Sequence[str | SessionBase] | None = None,
         reasoning_level: Literal["minimal", "low", "medium", "high", "max"]
         | None = None,
+        response_format: type[BaseModel] | dict[str, Any] | None = None,
+        include_evidence: bool = False,
     ) -> DialecticStreamResponse:
         """
         Query the peer's representation with a natural language question, streaming the response.
@@ -279,23 +471,53 @@ class Peer(PeerBase, MetadataConfigMixin):
             session: Optional session to scope the query to. If provided, only
                      information from that session is considered. Can be a session
                      ID string or a Session object.
+            scope: Optional scope(s) to confine the query to. See :meth:`chat`.
+            sessions: Optional allowlist of sessions to confine the query to. See
+                      :meth:`chat` for the depth caveat.
             reasoning_level: Optional reasoning level for the query: "minimal", "low", "medium",
                              "high", or "max". Defaults to "low" if not provided.
+            response_format: Optional structure for the answer: a Pydantic model
+                             class or a JSON Schema dict (root type "object").
+                             Streamed chunks stay raw text that accumulates to a
+                             JSON string; parse it yourself (e.g. with
+                             Model.model_validate_json) once the stream completes.
+            include_evidence: When True, the returned stream's ``evidence``
+                             attribute is populated once the stream has been
+                             fully consumed. Evidence cannot be known before
+                             the answer is complete, so the server sends it on
+                             the stream's final event.
 
         Returns:
             DialecticStreamResponse object that can be iterated over and provides final response
+
+        Raises:
+            ValueError: If ``scope`` is combined with ``session`` or ``sessions``.
         """
         self._honcho._ensure_workspace()
         target_id = resolve_id(target)
         resolved_session_id = resolve_id(session)
 
         body: dict[str, Any] = {"query": query, "stream": True}
+        body.update(
+            scope_recall_fields(
+                scope=scope, sessions=sessions, session_id=resolved_session_id
+            )
+        )
         if target_id:
             body["target"] = target_id
         if resolved_session_id:
             body["session_id"] = resolved_session_id
         if reasoning_level:
             body["reasoning_level"] = reasoning_level
+        response_format_schema = serialize_response_format(response_format)
+        if response_format_schema is not None:
+            body["response_format"] = response_format_schema
+        if include_evidence:
+            body["include_evidence"] = True
+
+        # The parser holds the evidence that arrives on the final event, so it
+        # has to outlive the generator that drains the stream.
+        parser = SSEStreamParser()
 
         def stream_response() -> Generator[str, None, None]:
             yield from parse_sse_stream(
@@ -303,41 +525,65 @@ class Peer(PeerBase, MetadataConfigMixin):
                     "POST",
                     routes.peer_chat(self.workspace_id, self.id),
                     body=body,
-                )
+                ),
+                parser=parser,
             )
 
-        return DialecticStreamResponse(stream_response())
+        return DialecticStreamResponse(stream_response(), lambda: parser.evidence)
 
     def sessions(
-        self, filters: dict[str, object] | None = None
+        self,
+        filters: dict[str, object] | None = None,
+        *,
+        page: int = 1,
+        size: int = 50,
+        reverse: bool = False,
     ) -> SyncPage[SessionResponse, "Session"]:
         """
         Get all sessions this peer is a member of.
 
-        Makes an API call to retrieve all sessions where this peer is an active participant.
-        Sessions are created when peers are added to them or send messages to them.
+        Args:
+            filters: Optional filter criteria.
+            page: Page number (1-indexed). Default: 1.
+            size: Number of items per page. Default: 50.
+            reverse: If True, reverses the default ordering. Default: False.
 
         Returns:
-            A paginated list of Session objects this peer belongs to. Returns an empty
-            list if the peer is not a member of any sessions
+            A paginated list of Session objects this peer belongs to.
         """
         self._honcho._ensure_workspace()
         # Import here to avoid circular import (session.py imports Peer)
         from .session import Session
 
+        query: dict[str, Any] = {"page": page, "size": size}
+        if reverse:
+            query["reverse"] = "true"
         data = self._honcho._http.post(
             routes.peer_sessions_list(self.workspace_id, self.id),
             body={"filters": filters} if filters else None,
+            query=query,
         )
 
         def transform(session: SessionResponse) -> Session:
-            return Session(session.id, self._honcho)
+            return Session(
+                session.id,
+                self._honcho,
+                metadata=session.metadata,
+                configuration=SessionConfiguration.model_validate(
+                    session.configuration.model_dump()
+                ),
+                created_at=session.created_at,
+                is_active=session.is_active,
+            )
 
-        def fetch_next(page: int) -> SyncPage[SessionResponse, Session]:
+        def fetch_next(next_page: int) -> SyncPage[SessionResponse, Session]:
+            next_query: dict[str, Any] = {"page": next_page, "size": size}
+            if reverse:
+                next_query["reverse"] = "true"
             next_data = self._honcho._http.post(
                 routes.peer_sessions_list(self.workspace_id, self.id),
                 body={"filters": filters} if filters else None,
-                query={"page": page},
+                query=next_query,
             )
             return SyncPage(next_data, SessionResponse, transform, fetch_next)
 
@@ -429,7 +675,7 @@ class Peer(PeerBase, MetadataConfigMixin):
 
         Args:
             query: The search query to use
-            filters: Filters to scope the search. See [search filters documentation](https://docs.honcho.dev/v3/documentation/core-concepts/features/using-filters).
+            filters: Filters to scope the search. See [search filters documentation](https://honcho.dev/docs/v3/documentation/core-concepts/features/using-filters).
             limit: Number of results to return (1-100, default: 10)
 
         Returns:
@@ -531,6 +777,9 @@ class Peer(PeerBase, MetadataConfigMixin):
         search_max_distance: float | None = Field(None, ge=0.0, le=1.0),
         include_most_frequent: bool | None = None,
         max_conclusions: int | None = Field(None, ge=1, le=100),
+        *,
+        scope: str | ScopeBase | Sequence[str | ScopeBase] | None = None,
+        sessions: Sequence[str | SessionBase] | None = None,
     ) -> str:
         """
         Get a subset of the representation of the peer.
@@ -544,9 +793,17 @@ class Peer(PeerBase, MetadataConfigMixin):
             search_max_distance: Maximum semantic distance for search results (0.0-1.0)
             include_most_frequent: Whether to include the most frequent conclusions
             max_conclusions: Maximum number of conclusions to include
+            scope: Optional scope(s) confining the representation. See
+                   :meth:`chat`. Mutually exclusive with ``session`` and ``sessions``.
+            sessions: Optional allowlist of sessions confining the representation to
+                      directly-stated conclusions from those sessions. See
+                      :meth:`chat` for the depth caveat.
 
         Returns:
             A Representation string
+
+        Raises:
+            ValueError: If ``scope`` is combined with ``session`` or ``sessions``.
 
         Example:
             ```python
@@ -569,7 +826,9 @@ class Peer(PeerBase, MetadataConfigMixin):
         session_id = resolve_id(session)
         target_id = resolve_id(target)
 
-        body: dict[str, Any] = {}
+        body: dict[str, Any] = scope_recall_fields(
+            scope=scope, sessions=sessions, session_id=session_id
+        )
         if session_id:
             body["session_id"] = session_id
         if target_id:
@@ -662,7 +921,7 @@ class Peer(PeerBase, MetadataConfigMixin):
         return PeerContextResponse.model_validate(data)
 
     @property
-    def conclusions(self) -> ConclusionScope:
+    def conclusions(self) -> ConclusionsView:
         """
         Access this peer's self-conclusions (where observer == observed == self).
 
@@ -670,7 +929,7 @@ class Peer(PeerBase, MetadataConfigMixin):
         has made about themselves. Use this for self-conclusion scenarios.
 
         Returns:
-            A ConclusionScope scoped to this peer's self-conclusions
+            A ConclusionsView scoped to this peer's self-conclusions
 
         Example:
             ```python
@@ -684,9 +943,9 @@ class Peer(PeerBase, MetadataConfigMixin):
             peer.conclusions.delete("obs-123")
             ```
         """
-        return ConclusionScope(self._honcho, self.workspace_id, self.id, self.id)
+        return ConclusionsView(self._honcho, self.workspace_id, self.id, self.id)
 
-    def conclusions_of(self, target: str | PeerBase) -> ConclusionScope:
+    def conclusions_of(self, target: str | PeerBase) -> ConclusionsView:
         """
         Access conclusions this peer has made about another peer.
 
@@ -697,7 +956,7 @@ class Peer(PeerBase, MetadataConfigMixin):
             target: The target peer (either a Peer object or peer ID string)
 
         Returns:
-            A ConclusionScope scoped to this peer's conclusions of the target
+            A ConclusionsView scoped to this peer's conclusions of the target
 
         Example:
             ```python
@@ -715,7 +974,7 @@ class Peer(PeerBase, MetadataConfigMixin):
             ```
         """
         target_id = target.id if isinstance(target, PeerBase) else target
-        return ConclusionScope(self._honcho, self.workspace_id, self.id, target_id)
+        return ConclusionsView(self._honcho, self.workspace_id, self.id, target_id)
 
     def __repr__(self) -> str:
         """

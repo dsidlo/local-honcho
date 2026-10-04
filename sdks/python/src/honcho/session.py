@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +21,7 @@ from .api_types import (
     SessionPeerConfig,
     SessionResponse,
 )
-from .base import PeerBase, SessionBase
+from .base import PeerBase, ScopeBase, SessionBase
 from .http import routes
 from .message import Message
 from .mixins import MetadataConfigMixin
@@ -32,6 +33,7 @@ from .utils import (
     normalize_peers_to_dict,
     prepare_file_for_upload,
     resolve_id,
+    scope_context_fields,
 )
 
 if TYPE_CHECKING:
@@ -62,6 +64,8 @@ class Session(SessionBase, MetadataConfigMixin):
 
     _metadata: dict[str, object] | None = PrivateAttr(default=None)
     _configuration: SessionConfiguration | None = PrivateAttr(default=None)
+    _created_at: datetime | None = PrivateAttr(default=None)
+    _is_active: bool | None = PrivateAttr(default=None)
     _honcho: "Honcho" = PrivateAttr()
 
     @property
@@ -73,6 +77,16 @@ class Session(SessionBase, MetadataConfigMixin):
     def configuration(self) -> SessionConfiguration | None:
         """Cached configuration for this session. May be stale. Use get_configuration() for fresh data."""
         return self._configuration
+
+    @property
+    def created_at(self) -> datetime | None:
+        """Timestamp when this session was created. Only available if fetched from the API."""
+        return self._created_at
+
+    @property
+    def is_active(self) -> bool | None:
+        """Whether this session is active. Only available if fetched from the API."""
+        return self._is_active
 
     # MetadataConfigMixin implementation
     def _get_http_client(self):
@@ -97,6 +111,30 @@ class Session(SessionBase, MetadataConfigMixin):
             exclude_none=True
         )
 
+    def _apply_session_response(self, session: SessionResponse) -> None:
+        self._metadata = session.metadata or {}
+        self._configuration = SessionConfiguration.model_validate(
+            session.configuration.model_dump()
+        )
+        self._created_at = session.created_at
+        self._is_active = session.is_active
+
+    def get_metadata(self) -> dict[str, object]:
+        """
+        Get metadata from the server and update the cache.
+
+        Returns:
+            A dictionary containing the metadata. Returns an empty dictionary
+            if no metadata is set.
+        """
+        self._honcho._ensure_workspace()
+        data = self._get_http_client().post(
+            self._get_fetch_route(), body=self._get_fetch_body()
+        )
+        session = SessionResponse.model_validate(data)
+        self._apply_session_response(session)
+        return self._metadata or {}
+
     def get_configuration(self) -> SessionConfiguration:  # pyright: ignore[reportIncompatibleMethodOverride]
         """
         Get configuration from the server and update the cache.
@@ -109,9 +147,19 @@ class Session(SessionBase, MetadataConfigMixin):
             self._get_fetch_route(), body=self._get_fetch_body()
         )
         session = SessionResponse.model_validate(data)
-        self._metadata = session.metadata or {}
-        self._configuration = session.configuration
-        return self._configuration
+        self._apply_session_response(session)
+        return self._configuration or SessionConfiguration()
+
+    def refresh(self) -> None:
+        """
+        Refresh cached metadata, configuration, and session status from the server.
+        """
+        self._honcho._ensure_workspace()
+        data = self._get_http_client().post(
+            self._get_fetch_route(), body=self._get_fetch_body()
+        )
+        session = SessionResponse.model_validate(data)
+        self._apply_session_response(session)
 
     @validate_call
     def set_configuration(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -171,6 +219,14 @@ class Session(SessionBase, MetadataConfigMixin):
             None,
             description="Optional configuration to set for this session. If set, will get/create session immediately with flags.",
         ),
+        created_at: datetime | None = Field(
+            None,
+            description="Timestamp when this session was created.",
+        ),
+        is_active: bool | None = Field(
+            None,
+            description="Whether this session is active.",
+        ),
     ) -> None:
         """
         Initialize a new Session.
@@ -192,21 +248,9 @@ class Session(SessionBase, MetadataConfigMixin):
         )
         self._honcho = honcho
         self._metadata = metadata
-        self._configuration = configuration
-
-        if configuration is not None or metadata is not None:
-            self._honcho._ensure_workspace()
-            body: dict[str, Any] = {"id": session_id}
-            if metadata is not None:
-                body["metadata"] = metadata
-            if configuration is not None:
-                body["configuration"] = configuration.model_dump(exclude_none=True)
-
-            data = honcho._http.post(routes.sessions(honcho.workspace_id), body=body)
-            session_data = SessionResponse.model_validate(data)
-            # Update cached values with API response
-            self._metadata = session_data.metadata
-            self._configuration = session_data.configuration  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._configuration = configuration  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._created_at = created_at
+        self._is_active = is_active
 
     def add_peers(
         self,
@@ -405,38 +449,43 @@ class Session(SessionBase, MetadataConfigMixin):
         filters: dict[str, object] | None = Field(
             None, description="Dictionary of filter criteria"
         ),
+        page: int = 1,
+        size: int = 50,
+        reverse: bool = False,
     ) -> SyncPage[MessageResponse, Message]:
         """
         Get messages from this session with optional filtering.
 
-        Makes an API call to retrieve messages from this session. Results can be
-        filtered based on various criteria.
-
         Args:
-            filters: Dictionary of filter criteria. Supported filters include:
-                    - peer_id: Filter messages by the peer who created them
-                    - metadata: Filter messages by metadata key-value pairs
-                    - timestamp_start: Filter messages after a specific timestamp
-                    - timestamp_end: Filter messages before a specific timestamp
+            filters: Dictionary of filter criteria.
+            page: Page number (1-indexed). Default: 1.
+            size: Number of items per page. Default: 50.
+            reverse: If True, returns messages in reverse chronological order. Default: False.
 
         Returns:
-            A list of Message objects matching the specified criteria, ordered by
-            creation time (most recent first)
+            A paginated result of Message objects.
         """
         self._honcho._ensure_workspace()
+        query: dict[str, Any] = {"page": page, "size": size}
+        if reverse:
+            query["reverse"] = "true"
         data = self._honcho._http.post(
             routes.messages_list(self.workspace_id, self.id),
             body={"filters": filters} if filters else None,
+            query=query,
         )
 
         def transform(response: MessageResponse) -> Message:
             return Message.from_api_response(response)
 
-        def fetch_next(page: int) -> SyncPage[MessageResponse, Message]:
+        def fetch_next(next_page: int) -> SyncPage[MessageResponse, Message]:
+            next_query: dict[str, Any] = {"page": next_page, "size": size}
+            if reverse:
+                next_query["reverse"] = "true"
             next_data = self._honcho._http.post(
                 routes.messages_list(self.workspace_id, self.id),
                 body={"filters": filters} if filters else None,
-                query={"page": page},
+                query=next_query,
             )
             return SyncPage(next_data, MessageResponse, transform, fetch_next)
 
@@ -503,6 +552,8 @@ class Session(SessionBase, MetadataConfigMixin):
             self._honcho,
             metadata=cloned.metadata,
             configuration=cloned.configuration,
+            created_at=cloned.created_at,
+            is_active=cloned.is_active,
         )
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
@@ -524,6 +575,14 @@ class Session(SessionBase, MetadataConfigMixin):
         peer_perspective: str | None = Field(
             None,
             description="A peer ID to get context *from the perspective of*. If given, response will attempt to include representation and card from the perspective of `peer_perspective`. Must be provided with `peer_target`.",
+        ),
+        scope: str | ScopeBase | None = Field(
+            None,
+            description="A scope to use as the perspective source instead of a peer: `peer_target`'s representation and card are read from what that scope observed. Must be provided with `peer_target`; mutually exclusive with `peer_perspective`. Requires a workspace-level key.",
+        ),
+        sessions: Sequence[str | SessionBase] | None = Field(
+            None,
+            description="An allowlist of sessions confining `peer_target`'s representation to that set. This session must be one of them. Mutually exclusive with `scope` and `limit_to_session`.",
         ),
         limit_to_session: bool = Field(
             False,
@@ -567,6 +626,11 @@ class Session(SessionBase, MetadataConfigMixin):
             peer_target: A peer ID to get context for.
             search_query: A query string for semantic search.
             peer_perspective: A peer ID to get context from the perspective of.
+            scope: A scope to read `peer_target`'s representation and card from.
+            sessions: An allowlist of sessions confining `peer_target`'s
+                representation. Recall is limited to conclusions stated directly in
+                those sessions, and the peer card is omitted, since neither derived
+                conclusions nor cards carry provable per-session provenance.
             limit_to_session: Whether to limit the representation to this session only.
             search_top_k: Number of semantically relevant facts to return.
             search_max_distance: Maximum semantic distance for search results.
@@ -577,6 +641,11 @@ class Session(SessionBase, MetadataConfigMixin):
             A SessionContext object containing the optimized message history and
             summary, if available, that maximizes conversational context while
             respecting the token limit
+
+        Raises:
+            ValueError: If `peer_target` is missing when required, or if `scope`,
+                `sessions`, `peer_perspective`, and `limit_to_session` are combined
+                in ways the server rejects.
 
         Note:
             Token counting is performed using tiktoken. For models using different
@@ -601,6 +670,13 @@ class Session(SessionBase, MetadataConfigMixin):
         query: dict[str, Any] = {
             "summary": summary,
             "limit_to_session": limit_to_session,
+            **scope_context_fields(
+                scope=scope,
+                sessions=sessions,
+                peer_target=peer_target,
+                peer_perspective=peer_perspective,
+                limit_to_session=limit_to_session,
+            ),
         }
         if tokens is not None:
             query["tokens"] = tokens
@@ -722,7 +798,7 @@ class Session(SessionBase, MetadataConfigMixin):
 
         Args:
             query: The search query to use
-            filters: Filters to scope the search. See [search filters documentation](https://docs.honcho.dev/v3/documentation/core-concepts/features/using-filters).
+            filters: Filters to scope the search. See [search filters documentation](https://honcho.dev/docs/v3/documentation/core-concepts/features/using-filters).
             limit: Number of results to return (1-100, default: 10)
 
         Returns:
@@ -918,6 +994,21 @@ class Session(SessionBase, MetadataConfigMixin):
             query=query,
         )
         return QueueStatusResponse.model_validate(data)
+
+    def get_message(self, message_id: str) -> Message:
+        """Get a single message by ID from this session.
+
+        Args:
+            message_id: The ID of the message to retrieve
+
+        Returns:
+            The Message object
+        """
+        self._honcho._ensure_workspace()
+        data = self._honcho._http.get(
+            routes.message(self.workspace_id, self.id, message_id)
+        )
+        return Message.from_api_response(MessageResponse.model_validate(data))
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def update_message(

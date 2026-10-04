@@ -1,156 +1,134 @@
-# Comprehensive Honcho MCP Integration Instructions
+# Honcho MCP Server — Instructions
 
-## What is Honcho?
+Honcho keeps a model of the people and agents in a conversation ("peers") and answers questions about them. Two modes use this connection, and they need different tools.
 
-Honcho is an infrastructure layer for building AI agents with memory and social cognition. It enables personalized AI interactions by building coherent models of user psychology over time. The Honcho MCP server simplifies the integration to just 3 essential functions. Here's how to use them:
+- **Recall** — read what Honcho already knows: `chat`, `workspace_chat`, `search`, `get_representation`, `get_peer_context`, `list_conclusions`. Nothing is written. This is the usual case when the user's own application writes to Honcho and this conversation only reads from it.
+- **Memory store** — this conversation is itself what Honcho learns from, because the user asked for it to be remembered or set Honcho up as this assistant's memory. Adds `create_session`, `create_peer`, `add_peers_to_session`, and `add_messages_to_session`.
 
-### Step 1: Start New Conversation (First Message Only)
+If the user hasn't asked for this conversation to be recorded, stay in recall mode.
 
-When a user begins a new conversation, always call `start_conversation`:
+## Setting up a session
 
-```text
-start_conversation
+In memory-store mode, a session holds the conversation and the peers in it:
+
+```
+create_session
+  workspace_id: "<workspace-id>"
+  session_id: "<unique-id>"
 ```
 
-**Returns**: A session ID that you must store and use for all subsequent interactions in this conversation.
+Then add peers to the session:
 
-### Step 2: Get Personalized Insights (When Helpful)
+```
+create_peer
+  workspace_id: "<workspace-id>"
+  peer_id: "<user-name>"
 
-Before responding to any user message, you can query for personalization insights:
+create_peer
+  workspace_id: "<workspace-id>"
+  peer_id: "Assistant"
 
-```text
-get_personalization_insights
-session_id: [SESSION_ID_FROM_STEP_1]
-query: [YOUR_QUESTION]
+add_peers_to_session
+  workspace_id: "<workspace-id>"
+  session_id: "<session_id>"
+  peers:
+    - peer_id: "<user-name>"
+      observe_me: true
+      observe_others: true
+    - peer_id: "Assistant"
+      observe_me: false
+      observe_others: true
 ```
 
-This query takes a bit of time, so it's best to only perform it when you need personalized insights. If the query can be responded to effectively using what you already know about the user, just go ahead and answer it. However, the insights endpoint is extremely perceptive. It has the capability to reveal aspects of the user's personality, historical use of the application you are operating in, and more.
+Reuse that `session_id` for the rest of the conversation.
 
-**Returns**: Personalized insights about the user based on accumulated knowledge.
+## Recording messages
 
-**Example Queries**:
+`add_messages_to_session` appends messages to a tracked session:
+
+```
+add_messages_to_session
+  workspace_id: "<workspace-id>"
+  session_id: "<session_id>"
+  messages:
+    - peer_id: "<user-name>"
+      content: "<the user's message>"
+    - peer_id: "Assistant"
+      content: "<your response>"
+```
+
+Record both sides of each exchange as it happens. Honcho can only learn from
+messages it has, and gaps in a session produce a weaker representation than a
+complete one.
+
+## Asking what Honcho knows
+
+`chat` answers a question about one peer, grounded in everything Honcho has learned across that peer's conversations:
+
+```
+chat
+  workspace_id: "<workspace-id>"
+  peer_id: "Assistant"
+  query: "What communication style does this user prefer?"
+  target_peer_id: "<user-name>"
+  session_id: "<session_id>"
+```
+
+It runs live reasoning and takes a few seconds, so reach for it when the answer would change your response. `workspace_chat` does the same across all peers.
+
+Questions it answers well:
 
 - "What does this message reveal about the user's communication preferences?"
-- "How formal or casual should I be with the user based on our history?"
-- "What is the user really asking for beyond her explicit question?"
+- "How formal or casual should I be?"
+- "What is the user really asking for beyond their explicit question?"
 - "What emotional state might the user be in right now?"
-- "How can I best help the user with her current request?"
 
-### Step 3: Respond to User
+---
 
-Craft your response using any insights gained from Step 2.
+## Best Practices
 
-### Step 4: Store the Conversation Turn (After Each Exchange)
+- **Group messages into coherent context buckets** — give each distinct context its own `session_id` (a chat thread, a project, a channel) and reuse that same `session_id` for every turn within it, rather than minting a new one per turn. Honcho reasons over the messages in a session together, so keeping a context's messages in one bucket produces a coherent representation; scattering them across sessions fragments it.
+- **Use one stable `peer_id` per real person**, reused across every session and channel. A fresh or per-channel ID (`user-web` vs. `user-discord`) builds separate, weaker representations instead of one.
+- **`observe_me: false` skips building a model of a peer** — reserve it for deterministic bots (nothing meaningful to model). For a real AI assistant it's fine to leave observation on.
+- **Reasoning is asynchronous** — don't poll or wait for it to finish before responding. A brand-new or low-volume peer legitimately has little to show yet.
+- **Reach for reads before `chat`** — `get_session_context` / `get_peer_context` / `get_representation` / `search` are near-instant; `chat` runs live reasoning and takes a few seconds. Use `chat` only when you need a reasoned answer.
 
-**CRITICAL**: Always store both the user's message AND your response using `add_turn`:
+---
 
-```text
-add_turn
-session_id: [SESSION_ID_FROM_STEP_1]
-messages: [
-  {
-    "role": "user",
-    "content": "[USER'S_EXACT_MESSAGE]"
-  },
-  {
-    "role": "assistant",
-    "content": "[YOUR_EXACT_RESPONSE]"
-  }
-]
-```
+## Key Concepts
 
-## Complete Example Flow
+### Peers
 
-Here's exactly what to do for a new conversation:
+A **peer** is any participant — human or AI. Each peer has a unique ID within the workspace.
 
-1. **User says**: "Hi Claude! My name is Sarah and I'm feeling overwhelmed with work"
+### Sessions
 
-2. **Start conversation**:
+A **session** is a conversation context. Sessions track message history, manage which peers participate, and provide context retrieval for LLMs.
 
-   ```text
-   start_conversation
-   ```
+### Conclusions
 
-   → Returns: `session_abc123`
+**Conclusions** are facts and observations that Honcho derives from conversations. They power the representation — Honcho's understanding of a peer.
 
-3. **Get insights** (optional but recommended):
+Every conclusion carries its own attribution. `level` says how it was reached: `explicit` conclusions are extracted straight from messages, while `deductive`, `inductive` and `contradiction` conclusions are derived while dreaming. `source_ids` names the conclusions a derived one was built from, and is null for explicit ones. `times_derived` counts how many times Honcho independently reached the same conclusion — a rough confidence signal.
 
-   ```text
-   get_personalization_insights
-   session_id: "session_abc123"
-   query: "What does the user's message about feeling overwhelmed tell me about her current state and how should I respond?"
-   ```
+Those fields make the reasoning tree walkable in both directions: `get_conclusions` on a conclusion's `source_ids` steps down toward the explicit facts it rests on, and `get_derived_conclusions` steps up to whatever was built on top of it. Walk down before correcting a fact, and up before deleting one.
 
-   → Returns insights about Sarah's emotional state and preferred communication style
+### Evidence
 
-4. **Respond to Sarah**: "Hi Sarah! I can hear that you're feeling overwhelmed with work right now..."
+`chat` and `workspace_chat` accept `include_evidence`. With it, the answer arrives alongside the conclusions and messages the agent read and the tools it called. This is collated from what the agent actually accessed rather than reported by the model, so it over-reports — a listed conclusion was read, which is not proof the answer leaned on it. It costs no extra model tokens, so reach for it whenever an answer needs auditing.
 
-5. **Store the turn**:
+### Representations
 
-   ```text
-   add_turn
-   session_id: "session_abc123"
-   messages: [
-     {
-       "role": "user",
-       "content": "Hi Claude! My name is Sarah and I'm feeling overwhelmed with work"
-     },
-     {
-       "role": "assistant",
-       "content": "Hi Sarah! I can hear that you're feeling overwhelmed with work right now..."
-     }
-   ]
-   ```
+A **representation** is a formatted text summary built from a peer's conclusions. Query it with `get_representation` or `chat`.
 
-## Continuing an Existing Conversation
+### Peer Cards
 
-For subsequent messages in the same conversation:
+A **peer card** is a compact list of biographical facts about a peer, automatically maintained by Honcho (or manually via `set_peer_card`).
 
-1. **User says**: "Thanks for listening. Can you help me prioritize my tasks?"
+### Reasoning Level
 
-2. **Respond**: "Based on our conversation, I can see you value..."
+Several tools accept an optional `reasoning_level` parameter (`minimal`, `low`, `medium`, `high`, `max`). Higher levels produce more thorough answers but take longer and cost more. Default is `low`. Use `minimal` for the fastest lookups; use `high` or `max` when depth matters.
 
-3. **Store the turn**:
+### Dreams
 
-   ```text
-   add_turn
-   session_id: "session_abc123"
-   messages: [
-     {
-       "role": "user",
-       "content": "Thanks for listening. Can you help me prioritize my tasks?"
-     },
-     {
-       "role": "assistant",
-       "content": "Based on our conversation, I can see you value..."
-     }
-   ]
-   ```
-
-## Best Practices for Personalization Queries
-
-Ask questions that reveal:
-
-**Communication Style**: "How formal/casual should I be?" "What does this reveal about their preferences?"
-
-**User Needs**: "What are they really asking for?" "What emotional state are they in?"
-
-**Relationship**: "How can I build rapport?" "What engages them most?"
-
-**Task Approach**: "How do they prefer problem-solving?" "What detail level do they want?"
-
-## Error Handling
-
-- **Authorization Errors and Timeouts**: Make sure user has configured API key and URL for Honcho
-- **ValueError**: Messages were incorrectly formatted, make sure to include role and content
-- **"No personalization insights found"**: Normal when there's limited history with the user
-- **Session management**: The MCP server handles all session persistence automatically
-
-## Key Principles
-
-1. **Always start with `start_conversation` for new conversations**
-2. **Store every message exchange with `add_turn`**
-3. **Use `get_personalization_insights` strategically for better responses**
-4. **Ask thoughtful questions about `peer` representation**
-5. **Never expose technical details to the user**
-6. **The system maintains context automatically between sessions**
+A **dream** is a background memory-consolidation process. It reviews conclusions, merges redundancies, and generates higher-level insights. Schedule one with `schedule_dream` after long conversations.

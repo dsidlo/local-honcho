@@ -1,56 +1,72 @@
 import uuid
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 
 from fastapi import Depends
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import settings
-from src.db import SessionLocal, request_context
-
-# Context variable to store test database session
-# When set, tracked_db will use this instead of creating a new SessionLocal
-_test_db_session: ContextVar[AsyncSession | None] = ContextVar("_test_db_session", default=None)
+from src.db import ReadSessionLocal, SessionLocal, request_context
 
 
 async def get_db():
-    """FastAPI Dependency Generator for Database"""
+    """FastAPI Dependency Generator for Database.
 
-    context = request_context.get() or "unknown"
-
+    The session is lazy: it does NOT check out a pooled connection here. The
+    AsyncSession checks one out on the first DB-touching call, so a handler doing
+    non-DB work (embedding/file/LLM) before its first query does not pin a
+    connection across it.
+    """
     db: AsyncSession = SessionLocal()
     try:
-        if settings.DB.TRACING:
-            await db.execute(
-                text("SELECT set_config('application_name', :name, false)"),
-                {"name": context},
-            )
         yield db
     except Exception:
         await db.rollback()
         raise
     finally:
-        if db.in_transaction():
-            await db.rollback()
+        # Always send ROLLBACK unconditionally so the wire-level transaction
+        # is closed before the TCP connection drops.  Supavisor v2 does NOT
+        # clean up orphaned transactions on client disconnect in transaction-
+        # pooling mode, so relying on `in_transaction()` (Python-side state)
+        # can leave the backend pinned with an open BEGIN. (Cheap no-op if the
+        # lazy session never checked out a connection.)
+        await db.rollback()
+        await db.close()
+
+
+async def get_read_db():
+    """FastAPI Dependency Generator for SELECT-only handlers.
+
+    Same lazy-checkout semantics as get_db, but the session is bound to the
+    AUTOCOMMIT read engine: no BEGIN is ever emitted, so the connection can not
+    sit 'idle in transaction' between the query and this teardown — a delayed
+    finally here is harmless (the backend is plain 'idle'). close() is still
+    required to release the connection itself back to the pool.
+
+    MUST only be used by handlers that never mutate; see ReadSessionLocal.
+    """
+    db: AsyncSession = ReadSessionLocal()
+    try:
+        yield db
+    finally:
+        # rollback is a wire-level no-op under AUTOCOMMIT; kept to reset any
+        # Python-side session state before close, mirroring get_db.
+        await db.rollback()
         await db.close()
 
 
 @asynccontextmanager
-async def tracked_db(operation_name: str | None = None):
+async def tracked_db(operation_name: str | None = None, *, read_only: bool = False):
     """Context manager for tracked database sessions.
-    
-    In tests, this will use the test database session if one is set via
-    set_test_db_session(). Otherwise, it creates a new SessionLocal connection.
+
+    Sets a task-scoped request_context so the lazy session picks it up for
+    tracing/attribution, then yields a lazy session (see get_db).
+
+    Pass read_only=True for SELECT-only windows: the session is then bound to
+    the AUTOCOMMIT read engine, so the work inside the block never holds an
+    open transaction (no idle-in-transaction parking; the pooler can reclaim
+    the backend between statements). Never use read_only=True on a path that
+    mutates — see ReadSessionLocal.
     """
-    # Check if we're in a test context with a test session
-    test_session = _test_db_session.get()
-    if test_session is not None:
-        # Use the test session directly - no need to close it
-        yield test_session
-        return
-    
-    # Normal production flow: create a new session
+    # Get request ID if available, or create operation-specific one
     context = request_context.get()
     token = None
 
@@ -58,35 +74,20 @@ async def tracked_db(operation_name: str | None = None):
         context = f"task:{operation_name}:{str(uuid.uuid4())[:8]}"
         token = request_context.set(context)
 
-    # Create session with tracking info
-    db = SessionLocal()
-
+    db = (ReadSessionLocal if read_only else SessionLocal)()
     try:
-        if settings.DB.TRACING:
-            await db.execute(
-                text("SELECT set_config('application_name', :name, false)"),
-                {"name": context or f"task:{operation_name}"},
-            )
-
         yield db
     except Exception:
         await db.rollback()
         raise
     finally:
-        if db.in_transaction():
-            await db.rollback()
+        # Always send ROLLBACK unconditionally — see get_db() comment. (Under
+        # read_only/AUTOCOMMIT it is a wire-level no-op.)
+        await db.rollback()
         await db.close()
         if token:  # Only reset if we set it
             request_context.reset(token)
 
 
-def set_test_db_session(session: AsyncSession | None) -> object:
-    """Set the test database session for tracked_db to use.
-    
-    This should only be used in test fixtures to inject the test session.
-    Returns a token that must be used to reset the context.
-    """
-    return _test_db_session.set(session)
-
-
 db: AsyncSession = Depends(get_db)
+read_db: AsyncSession = Depends(get_read_db)

@@ -6,11 +6,9 @@ from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool, text
+from sqlalchemy import Connection, engine_from_config, text
 
-# Ensure a connection URI is always present for the migration process.
-# Alembic runs with only the base environment; src.config requires a URI.
-# If none is configured, fall back to the local Unix-socket postgres.
+# Local fork defaults: Alembic runs with only the base environment.
 os.environ.setdefault(
     'HONCHO_DB_CONNECTION_URI',
     'postgresql+psycopg://dsidlo@localhost:5433/honcho_dev',
@@ -19,7 +17,11 @@ os.environ.setdefault('LLM__EMBEDDING_PROVIDER', 'ollama')
 
 from src.config import settings
 
-from src.models import Base  # noqa: F401  (registers all models on Base.metadata)
+# Import your models
+from src.db import Base
+
+# Import all models so they register with Base.metadata
+import src.models  # noqa: F401
 
 
 # Set up logging more verbosely
@@ -52,12 +54,8 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    # Prefer the URL the caller pinned into the Alembic config (tests point
-    # this at a dedicated migration-test database). Fall back to app settings.
-    url = config.get_main_option("sqlalchemy.url")
-    if not url or url == "driver://user:pass@localhost/dbname":
-        url = settings.DB.CONNECTION_URI
-    if not url:
+    url = settings.DB.CONNECTION_URI
+    if url is None:
         raise ValueError("DB_CONNECTION_URI not set")
     return url
 
@@ -74,13 +72,99 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = get_url()
+    url = ensure_session_pooler(get_url())
 
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table_schema=target_metadata.schema,  # This sets schema for version table
+    )
+
+    with context.begin_transaction():
+        context.execute(f"SET search_path TO {target_metadata.schema}")
+        context.run_migrations()
+
+
+def ensure_session_pooler(connection_uri: str) -> str:
+    """
+    Ensure a PostgreSQL connection URI uses the session pooler port (5432).
+
+    Converts transaction pooler port (6543) to session pooler port (5432).
+    Leaves other ports unchanged.
+
+    Args:
+        connection_uri: PostgreSQL connection URI
+
+    Returns:
+        Connection URI with session pooler port (5432)
+
+    Examples:
+        >>> ensure_session_pooler("postgresql://user:pass@host:6543/db")
+        'postgresql://user:pass@host:5432/db'
+
+        >>> ensure_session_pooler("postgresql://user:pass@host:5432/db")
+        'postgresql://user:pass@host:5432/db'
+
+        >>> ensure_session_pooler("postgresql+psycopg://user:pass@host.supabase.co:6543/postgres")
+        'postgresql+psycopg://user:pass@host.supabase.co:5432/postgres'
+    """
+    parsed = urlparse(connection_uri)
+
+    # Get current port, default to 5432 if not specified
+    current_port = parsed.port or 5432
+
+    # If using transaction pooler port (6543), switch to session pooler (5432)
+    if current_port == 6543:
+        # Replace the port in the netloc
+        if parsed.port:
+            # If port is explicitly in the URL, replace it
+            new_netloc = parsed.netloc.replace(f":{current_port}", ":5432")
+        else:
+            # If port not in URL but somehow detected, add it
+            new_netloc = f"{parsed.netloc}:5432"
+
+        # Reconstruct the URL with new port
+        new_parsed = parsed._replace(netloc=new_netloc)
+        return urlunparse(new_parsed)
+
+    return connection_uri
+
+
+def _run_migrations_with_connection(
+    connection: Connection, *, owns_transaction: bool
+) -> None:
+    """Prepare the schema on an open connection, then run migrations over it.
+
+    When the caller owns the transaction, schema prep is left for them to commit.
+    """
+
+    # Create schema and commit it outside the main migration transaction
+    connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {target_metadata.schema};"))
+    connection.execute(
+        text(f"GRANT ALL ON SCHEMA {target_metadata.schema} TO current_user")
+    )
+    # Install pgvector extension if it doesn't exist
+    connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    # Set and verify search_path
+    connection.execute(
+        text(f"SET search_path TO {target_metadata.schema}, public, extensions")
+    )
+    if owns_transaction:
+        connection.commit()
+
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        version_table_schema=target_metadata.schema,
+        include_schemas=True,
+        include_object=lambda obj, name, type_, reflected, compare_to: (
+            # Only include objects from our target schema
+            getattr(obj, "schema", None) == target_metadata.schema
+            if hasattr(obj, "schema")
+            else True
+        ),
     )
 
     with context.begin_transaction():
@@ -90,34 +174,40 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode.
 
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
+    Reuses a connection supplied via ``config.attributes["connection"]`` when
+    the caller provides one; otherwise builds an engine from the config.
     """
-    # Tests may inject a connection into the config; reuse it if present.
+
     connection = config.attributes.get("connection")
+    if connection is not None:
+        _run_migrations_with_connection(connection, owns_transaction=False)
+        return
 
-    if connection is None:
-        connectable = engine_from_config(
-            config.get_section(config.config_ini_section),
-            prefix="sqlalchemy.",
-            poolclass=pool.NullPool,
-            url=get_url(),
-        )
+    configuration = config.get_section(config.config_ini_section)
+    if configuration is None:
+        configuration = {}
+
+    url = get_url()
+    validated_url = ensure_session_pooler(url)
+    configuration["sqlalchemy.url"] = validated_url
+
+    connectable = engine_from_config(
+        configuration,
+        prefix="sqlalchemy.",
+        echo=False,
+        connect_args={
+            "prepare_threshold": None,
+            "options": "-c statement_timeout=300000",  # 5 minutes in milliseconds
+        },
+    )
+
+    try:
         with connectable.connect() as connection:
-            context.configure(
-                connection=connection, target_metadata=target_metadata
-            )
-
-            with context.begin_transaction():
-                context.run_migrations()
-    else:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
-
-        with context.begin_transaction():
-            context.run_migrations()
+            _run_migrations_with_connection(connection, owns_transaction=True)
+    finally:
+        # Release pooled connections immediately; lingering ones block
+        # DROP DATABASE in test harnesses that invoke alembic repeatedly.
+        connectable.dispose()
 
 
 if context.is_offline_mode():

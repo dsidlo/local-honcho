@@ -1,3 +1,4 @@
+.worktrees/
 api/**/*.db
 api/data
 api/docker-compose.yml
@@ -5,8 +6,8 @@ api/docker-compose.yml
 *.db
 data
 redis-data
-docker-compose.yml
-compose.yml
+/docker-compose.yml
+/compose.yml
 
 
 
@@ -184,6 +185,7 @@ docs/node_modules
 
 timing_logs.csv
 
+config.json
 config.toml
 .aider*
 
@@ -194,3 +196,10 @@ metrics.jsonl
 AGENTS.md
 lancedb_data/
 grafana-data/
+
+# Claude Code addon stuff
+.omc
+
+# Sandbox real-provider credentials (see sandbox/real.env.example)
+sandbox/real.env
+sandbox/.state.env

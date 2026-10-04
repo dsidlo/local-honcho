@@ -5,20 +5,26 @@ This module consolidates all telemetry, metrics, and observability functionality
 - Sentry: Error tracking and performance tracing
 - Prometheus: Pull-based metrics scraped by Fly.io
 - CloudEvents: Structured events for analytics (push-based)
-- Logging: Langfuse integration, Rich console output, metric accumulation
+- Langfuse: a projection over the captured LLM call stream (langfuse_exporter)
+- Logging: Rich console output, metric accumulation
 - Tracing: Sentry transaction decorators
 - Metrics Collector: JSON file-based benchmark aggregation
 - Reasoning Traces: JSONL logging of LLM inputs/outputs
 """
 
 from src.telemetry.events import emit
-from src.telemetry.prometheus import metrics_endpoint, prometheus_metrics
+from src.telemetry.prometheus import (
+    metrics_endpoint,
+    prometheus_metrics,
+    register_db_pool_collector,
+)
 
 __all__ = [
     "emit",
     "initialize_telemetry_async",
     "metrics_endpoint",
     "prometheus_metrics",
+    "register_db_pool_collector",
     "shutdown_telemetry",
 ]
 
@@ -37,6 +43,8 @@ async def initialize_telemetry_async() -> None:
     from src.config import settings
     from src.telemetry.events import initialize_telemetry_events
 
+    # Master switch for every trace sink, Langfuse included: telemetry off
+    # initializes nothing.
     if settings.TELEMETRY.ENABLED:
         await initialize_telemetry_events()
 
@@ -47,8 +55,17 @@ async def shutdown_telemetry() -> None:
 
     This should be called during application shutdown to ensure:
     - CloudEvents buffer is flushed
+    - Langfuse's buffered observations are flushed (its background exporter and
+      atexit hook don't fire reliably on SIGTERM)
     """
     from src.telemetry.events import shutdown_telemetry_events
+    from src.telemetry.logging import flush_langfuse
 
-    # Shutdown CloudEvents emitter (flushes buffer)
-    await shutdown_telemetry_events()
+    # Flush Langfuse even if the CloudEvents shutdown raises, so the final
+    # batch of spans isn't dropped on a noisy shutdown.
+    try:
+        # Shutdown CloudEvents emitter (flushes buffer)
+        await shutdown_telemetry_events()
+    finally:
+        # Flush any buffered Langfuse spans before the process exits.
+        flush_langfuse()

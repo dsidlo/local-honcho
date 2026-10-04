@@ -7,12 +7,24 @@ icon: 'puzzle-piece'
 
 Honcho plugs into whatever you're already building. Add memory to an AI assistant, connect an external data source, wire Honcho into your agent framework, or migrate from another provider.
 
+## Recipes
+Compose the core primitives across multiple integrations:
+
+<CardGroup cols={2}>
+  <Card title="Unified Memory Setup" icon="diagram-project" href="/v3/guides/recipes/unified-memory-setup">
+    One shared workspace across a chat companion, coding agent, autonomous agent, and ingestion job
+  </Card>
+</CardGroup>
+
 ## AI Assistants
 Add persistent memory to AI assistants and agents:
 
 <CardGroup cols={2}>
   <Card title="Claude Code" icon="terminal" href="/v3/guides/integrations/claude-code">
     Long-term memory that survives context wipes, session restarts, and project switches
+  </Card>
+  <Card title="OpenCode" icon="code" href="/v3/guides/integrations/opencode">
+    Persistent memory for OpenCode sessions, with per-directory, per-repo, or branch-scoped session mapping
   </Card>
   <Card title="MCP Server" icon="star-of-life" href="/v3/guides/integrations/mcp">
     Add Honcho memory to Claude Desktop, Cursor, Windsurf, Cline, and any MCP client
@@ -44,6 +56,9 @@ Connect external platforms to Honcho:
   <Card title="Granola" icon="calendar" href="/v3/guides/granola">
     Ingest meeting transcripts with speaker turns and participant data
   </Card>
+  <Card title="Paperclip" icon="paperclip" href="/v3/guides/integrations/paperclip">
+    Add Honcho memory to Paperclip companies, agents, issues, and documents
+  </Card>
   <Card title="Reachy Mini" icon="robot" href="/v3/guides/integrations/reachy-mini">
     Build an embodied voice robot with long-term memory
   </Card>
@@ -58,6 +73,9 @@ Use Honcho as a memory layer in your agent orchestration stack:
   </Card>
   <Card title="CrewAI" icon="users-gear" href="/v3/guides/integrations/crewai">
     Give CrewAI agents memory that persists across sessions
+  </Card>
+  <Card title="Zo Computer" icon="bolt" href="/v3/guides/integrations/zo-computer">
+    Persistent memory skill for Zo Computer AI workflows
   </Card>
   <Card title="n8n" icon="share-nodes" href="/v3/guides/integrations/n8n">
     Build intelligent automation workflows with persistent memory

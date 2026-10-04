@@ -1,12 +1,16 @@
+import datetime
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from nanoid import generate as generate_nanoid
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src import crud
+from src import crud, models
+from src.config import settings
 from src.models import Peer, Workspace
+from src.security import JWTParams, create_jwt
 
 
 def test_get_or_create_peer(client: TestClient, sample_data: tuple[Workspace, Peer]):
@@ -169,6 +173,146 @@ def test_get_peers_with_null_filter(
     assert isinstance(data["items"], list)
 
 
+def test_get_peers_with_reverse(
+    client: TestClient, sample_data: tuple[Workspace, Peer]
+):
+    """Test peer listing with reverse creation-time ordering."""
+    test_workspace, _ = sample_data
+    reverse_group = f"reverse-peers-{generate_nanoid()}"
+    first_name = f"reverse-peer-a-{generate_nanoid()}"
+    second_name = f"reverse-peer-b-{generate_nanoid()}"
+
+    first_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers",
+        json={"name": first_name, "metadata": {"reverse_group": reverse_group}},
+    )
+    assert first_response.status_code in [200, 201]
+
+    second_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers",
+        json={"name": second_name, "metadata": {"reverse_group": reverse_group}},
+    )
+    assert second_response.status_code in [200, 201]
+
+    normal_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/list",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert normal_response.status_code == 200
+
+    reverse_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/list?reverse=true",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert reverse_response.status_code == 200
+
+    assert [item["id"] for item in normal_response.json()["items"]] == [
+        first_name,
+        second_name,
+    ]
+    assert [item["id"] for item in reverse_response.json()["items"]] == [
+        second_name,
+        first_name,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_peers_reverse_uses_id_tiebreaker(
+    client: TestClient,
+    db_session: AsyncSession,
+    sample_data: tuple[Workspace, Peer],
+):
+    """Peers with identical created_at fall back to ordering by id (nanoid PK)."""
+    test_workspace, _ = sample_data
+    reverse_group = f"tiebreaker-peers-{generate_nanoid()}"
+    shared_created_at = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+
+    low_id = "A" * 21
+    high_id = "z" * 21
+    low_name = f"tie-low-peer-{generate_nanoid()}"
+    high_name = f"tie-high-peer-{generate_nanoid()}"
+
+    db_session.add(
+        models.Peer(
+            id=low_id,
+            name=low_name,
+            workspace_name=test_workspace.name,
+            created_at=shared_created_at,
+            h_metadata={"reverse_group": reverse_group},
+        )
+    )
+    db_session.add(
+        models.Peer(
+            id=high_id,
+            name=high_name,
+            workspace_name=test_workspace.name,
+            created_at=shared_created_at,
+            h_metadata={"reverse_group": reverse_group},
+        )
+    )
+    await db_session.commit()
+
+    normal_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/list",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert normal_response.status_code == 200
+
+    reverse_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/list?reverse=true",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert reverse_response.status_code == 200
+
+    # When created_at ties, ordering falls back to the nanoid id: low_id < high_id
+    # lexicographically, so low sorts first ascending and last descending.
+    assert [item["id"] for item in normal_response.json()["items"]] == [
+        low_name,
+        high_name,
+    ]
+    assert [item["id"] for item in reverse_response.json()["items"]] == [
+        high_name,
+        low_name,
+    ]
+
+
+def test_get_peers_reverse_with_pagination(
+    client: TestClient, sample_data: tuple[Workspace, Peer]
+):
+    """Paged reverse listing returns newest-first across consecutive pages."""
+    test_workspace, _ = sample_data
+    reverse_group = f"paged-reverse-peers-{generate_nanoid()}"
+    peer_names = [f"paged-reverse-peer-{i}-{generate_nanoid()}" for i in range(3)]
+
+    for peer_name in peer_names:
+        response = client.post(
+            f"/v3/workspaces/{test_workspace.name}/peers",
+            json={"name": peer_name, "metadata": {"reverse_group": reverse_group}},
+        )
+        assert response.status_code in [200, 201]
+
+    page_one = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/list?reverse=true&page=1&size=1",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert page_one.status_code == 200
+    page_two = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/list?reverse=true&page=2&size=1",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert page_two.status_code == 200
+    page_three = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/list?reverse=true&page=3&size=1",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert page_three.status_code == 200
+
+    assert page_one.json()["total"] == 3
+    assert [item["id"] for item in page_one.json()["items"]] == [peer_names[2]]
+    assert [item["id"] for item in page_two.json()["items"]] == [peer_names[1]]
+    assert [item["id"] for item in page_three.json()["items"]] == [peer_names[0]]
+
+
 def test_update_peer(client: TestClient, sample_data: tuple[Workspace, Peer]):
     test_workspace, test_peer = sample_data
     response = client.put(
@@ -308,6 +452,157 @@ def test_get_sessions_for_peer_with_empty_filter(
     assert isinstance(data["items"], list)
 
 
+def test_get_sessions_for_peer_with_reverse(
+    client: TestClient, sample_data: tuple[Workspace, Peer]
+):
+    """Test peer session listing with reverse creation-time ordering."""
+    test_workspace, test_peer = sample_data
+    reverse_group = f"reverse-peer-sessions-{generate_nanoid()}"
+    first_session = f"reverse-peer-session-a-{generate_nanoid()}"
+    second_session = f"reverse-peer-session-b-{generate_nanoid()}"
+
+    first_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/sessions",
+        json={
+            "id": first_session,
+            "peer_names": {test_peer.name: {}},
+            "metadata": {"reverse_group": reverse_group},
+        },
+    )
+    assert first_response.status_code in [200, 201]
+
+    second_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/sessions",
+        json={
+            "id": second_session,
+            "peer_names": {test_peer.name: {}},
+            "metadata": {"reverse_group": reverse_group},
+        },
+    )
+    assert second_response.status_code in [200, 201]
+
+    normal_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/sessions",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert normal_response.status_code == 200
+
+    reverse_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/sessions?reverse=true",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert reverse_response.status_code == 200
+
+    assert [item["id"] for item in normal_response.json()["items"]] == [
+        first_session,
+        second_session,
+    ]
+    assert [item["id"] for item in reverse_response.json()["items"]] == [
+        second_session,
+        first_session,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_sessions_for_peer_reverse_uses_id_tiebreaker(
+    client: TestClient,
+    db_session: AsyncSession,
+    sample_data: tuple[Workspace, Peer],
+):
+    """Peer-scoped sessions with identical created_at fall back to ordering by id."""
+    test_workspace, test_peer = sample_data
+    reverse_group = f"tiebreaker-peer-sessions-{generate_nanoid()}"
+    shared_created_at = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
+
+    low_id = "A" * 21
+    high_id = "z" * 21
+    low_name = f"tie-low-peer-session-{generate_nanoid()}"
+    high_name = f"tie-high-peer-session-{generate_nanoid()}"
+
+    for session_id, session_name in ((low_id, low_name), (high_id, high_name)):
+        db_session.add(
+            models.Session(
+                id=session_id,
+                name=session_name,
+                workspace_name=test_workspace.name,
+                created_at=shared_created_at,
+                h_metadata={"reverse_group": reverse_group},
+            )
+        )
+        db_session.add(
+            models.SessionPeer(
+                workspace_name=test_workspace.name,
+                session_name=session_name,
+                peer_name=test_peer.name,
+            )
+        )
+    await db_session.commit()
+
+    normal_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/sessions",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert normal_response.status_code == 200
+
+    reverse_response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/sessions?reverse=true",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert reverse_response.status_code == 200
+
+    assert [item["id"] for item in normal_response.json()["items"]] == [
+        low_name,
+        high_name,
+    ]
+    assert [item["id"] for item in reverse_response.json()["items"]] == [
+        high_name,
+        low_name,
+    ]
+
+
+def test_get_sessions_for_peer_reverse_with_pagination(
+    client: TestClient, sample_data: tuple[Workspace, Peer]
+):
+    """Paged reverse listing of a peer's sessions returns newest-first across pages."""
+    test_workspace, test_peer = sample_data
+    reverse_group = f"paged-reverse-peer-sessions-{generate_nanoid()}"
+    session_names = [
+        f"paged-reverse-peer-session-{i}-{generate_nanoid()}" for i in range(3)
+    ]
+
+    for session_name in session_names:
+        response = client.post(
+            f"/v3/workspaces/{test_workspace.name}/sessions",
+            json={
+                "id": session_name,
+                "peer_names": {test_peer.name: {}},
+                "metadata": {"reverse_group": reverse_group},
+            },
+        )
+        assert response.status_code in [200, 201]
+
+    page_one = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/sessions?reverse=true&page=1&size=1",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert page_one.status_code == 200
+    page_two = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/sessions?reverse=true&page=2&size=1",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert page_two.status_code == 200
+    page_three = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/sessions?reverse=true&page=3&size=1",
+        json={"filters": {"metadata": {"reverse_group": reverse_group}}},
+    )
+    assert page_three.status_code == 200
+
+    assert page_one.json()["total"] == 3
+    assert [item["id"] for item in page_one.json()["items"]] == [session_names[2]]
+    assert [item["id"] for item in page_two.json()["items"]] == [session_names[1]]
+    assert [item["id"] for item in page_three.json()["items"]] == [session_names[0]]
+
+
 def test_chat(
     client: TestClient,
     sample_data: tuple[Workspace, Peer],
@@ -325,6 +620,39 @@ def test_chat(
     assert response.status_code == 200
     data = response.json()
     assert "content" in data
+
+
+@pytest.mark.asyncio
+async def test_chat_peer_key_denied_for_non_member_session(
+    client: TestClient,
+    db_session: AsyncSession,
+    sample_data: tuple[Workspace, Peer],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A peer-scoped key cannot chat scoped to a session its peer is not a member
+    of — the session id is in the body, so the handler checks membership. The
+    guard fires before the dialectic runs, so no LLM call is made."""
+    test_workspace, alice = sample_data
+    session_id = str(generate_nanoid())
+
+    # Session exists but alice is NOT a member of it.
+    client.post(
+        f"/v3/workspaces/{test_workspace.name}/sessions",
+        json={"id": session_id},
+    )
+    await db_session.commit()
+
+    monkeypatch.setattr(settings.AUTH, "USE_AUTH", True)
+    monkeypatch.setattr(settings.AUTH, "JWT_SECRET", "test-secret")
+    client.headers["Authorization"] = (
+        f"Bearer {create_jwt(JWTParams(w=test_workspace.name, p=alice.name))}"
+    )
+
+    response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{alice.name}/chat",
+        json={"query": "what do you know?", "stream": False, "session_id": session_id},
+    )
+    assert response.status_code == 401
 
 
 def test_chat_with_optional_params(
@@ -570,25 +898,6 @@ def test_get_peer_representation_with_all_parameters(
     )
     assert response.status_code == 200
     data = response.json()
-    assert "representation" in data
-    assert isinstance(data["representation"], str)
-
-
-def test_get_peer_representation_structure(
-    client: TestClient, sample_data: tuple[Workspace, Peer]
-):
-    """Test that peer representation response has correct structure"""
-    test_workspace, test_peer = sample_data
-
-    # Get representation and validate structure
-    response = client.post(
-        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/representation",
-        json={},
-    )
-    assert response.status_code == 200
-    data = response.json()
-
-    # Validate response structure
     assert "representation" in data
     assert isinstance(data["representation"], str)
 
@@ -956,3 +1265,191 @@ def test_set_peer_card(client: TestClient, sample_data: tuple[Workspace, Peer]):
     )
     assert response.status_code == 200
     assert response.json()["peer_card"] == target_card
+
+
+FOOD_PREFS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "preferences": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "food": {"type": "string"},
+                    "sentiment": {"enum": ["loves", "likes", "dislikes"]},
+                },
+                "required": ["food", "sentiment"],
+            },
+        },
+        "summary": {"type": "string"},
+    },
+    "required": ["preferences", "summary"],
+}
+
+
+def test_chat_with_response_format(
+    client: TestClient,
+    sample_data: tuple[Workspace, Peer],
+    mock_llm_call_functions: dict[str, Any],
+):
+    """A valid response_format converts to a Pydantic model and is passed to
+    the dialectic as response_model."""
+    test_workspace, test_peer = sample_data
+
+    response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/chat",
+        json={
+            "query": "What are this user's food preferences?",
+            "stream": False,
+            "response_format": FOOD_PREFS_SCHEMA,
+        },
+    )
+    assert response.status_code == 200
+    assert "content" in response.json()
+
+    kwargs = mock_llm_call_functions["agentic_chat"].await_args.kwargs
+    response_model = kwargs["response_model"]
+    assert isinstance(response_model, type)
+    assert issubclass(response_model, BaseModel)
+    # The converted model enforces the caller's schema.
+    instance = response_model.model_validate(
+        {"preferences": [{"food": "sushi", "sentiment": "loves"}], "summary": "s"}
+    )
+    assert instance.summary == "s"  # pyright: ignore
+
+
+def test_chat_with_response_format_streaming(
+    client: TestClient,
+    sample_data: tuple[Workspace, Peer],
+    mock_llm_call_functions: dict[str, Any],
+):
+    test_workspace, test_peer = sample_data
+
+    response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/chat",
+        json={
+            "query": "What are this user's food preferences?",
+            "stream": True,
+            "response_format": FOOD_PREFS_SCHEMA,
+        },
+    )
+    assert response.status_code == 200
+    assert "data:" in response.text
+
+    kwargs = mock_llm_call_functions["agentic_chat_stream"].call_args.kwargs
+    response_model = kwargs["response_model"]
+    assert isinstance(response_model, type)
+    assert issubclass(response_model, BaseModel)
+
+
+@pytest.mark.parametrize(
+    "bad_schema",
+    [
+        {"type": "string"},  # non-object root
+        {"type": "object", "properties": {"a": {"$ref": "#/x"}}},
+        {"type": "object", "properties": {"a": {"allOf": [{"type": "string"}]}}},
+        {
+            "type": "object",
+            "properties": {
+                "m": {"type": "object", "additionalProperties": {"type": "string"}}
+            },
+        },
+    ],
+)
+def test_chat_with_invalid_response_format(
+    client: TestClient,
+    sample_data: tuple[Workspace, Peer],
+    mock_llm_call_functions: dict[str, Any],
+    bad_schema: dict[str, Any],
+):
+    """Unsupported schemas are rejected with 422 before the dialectic runs."""
+    test_workspace, test_peer = sample_data
+
+    response = client.post(
+        f"/v3/workspaces/{test_workspace.name}/peers/{test_peer.name}/chat",
+        json={
+            "query": "Hello?",
+            "stream": False,
+            "response_format": bad_schema,
+        },
+    )
+    assert response.status_code == 422
+    assert "Invalid response_format" in response.json()["detail"]
+    mock_llm_call_functions["agentic_chat"].assert_not_awaited()
+
+
+def _get_search_context(
+    client: TestClient, workspace: Workspace, peer: Peer, route: str, query: str
+):
+    base = f"/v3/workspaces/{workspace.name}"
+    if route == "peer_context":
+        return client.get(
+            f"{base}/peers/{peer.name}/context", params={"search_query": query}
+        )
+    if route == "peer_representation":
+        return client.post(
+            f"{base}/peers/{peer.name}/representation", json={"search_query": query}
+        )
+    session_id = str(generate_nanoid())
+    client.post(f"{base}/sessions", json={"id": session_id, "peers": {peer.name: {}}})
+    return client.get(
+        f"{base}/sessions/{session_id}/context",
+        params={"peer_target": peer.name, "search_query": query},
+    )
+
+
+@pytest.mark.parametrize("route", ["peer_context", "peer_representation", "session"])
+def test_oversized_search_query_is_truncated_before_embedding(
+    client: TestClient,
+    sample_data: tuple[Workspace, Peer],
+    mock_openai_embeddings: dict[str, Any],
+    route: str,
+):
+    """An over-limit search_query is truncated once, not rejected and re-embedded."""
+    from src.embedding_client import EmbeddingTokenLimitError
+
+    test_workspace, test_peer = sample_data
+    limit = 10
+    long_query = "x" * (limit * 5)
+
+    mock_embed = mock_openai_embeddings["embed"]
+    default_embed = mock_embed.side_effect
+
+    def strict_embed(query: str) -> list[float]:
+        if len(query) > limit:
+            raise EmbeddingTokenLimitError("too long")
+        return default_embed(query)
+
+    mock_embed.side_effect = strict_embed
+
+    def truncate(text: str) -> str:
+        return text[:limit]
+
+    mock_openai_embeddings["truncate_to_token_limit"].side_effect = truncate
+
+    response = _get_search_context(client, test_workspace, test_peer, route, long_query)
+
+    assert response.status_code == 200
+    mock_embed.assert_called_once_with(long_query[:limit])
+
+
+@pytest.mark.parametrize("route", ["peer_context", "peer_representation", "session"])
+def test_search_query_truncation_failure_degrades(
+    client: TestClient,
+    sample_data: tuple[Workspace, Peer],
+    mock_openai_embeddings: dict[str, Any],
+    route: str,
+):
+    """A truncation failure (e.g. tiktoken rejecting a special token) degrades to
+    non-semantic retrieval instead of failing the request or re-embedding."""
+    test_workspace, test_peer = sample_data
+    mock_openai_embeddings["truncate_to_token_limit"].side_effect = ValueError(
+        "disallowed special token"
+    )
+
+    response = _get_search_context(
+        client, test_workspace, test_peer, route, "<|endoftext|>"
+    )
+
+    assert response.status_code == 200
+    mock_openai_embeddings["embed"].assert_not_called()

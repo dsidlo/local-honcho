@@ -200,12 +200,19 @@ sessions = honcho.sessions()
 # Search across all content in workspace
 results = honcho.search(query)
 
+# Ask a question across every peer in the workspace
+answer = honcho.chat(query)
+stream = honcho.chat_stream(query)
+
 # Workspace metadata management
 metadata = honcho.get_metadata()
 honcho.set_metadata(dict)
 
 # Get list of all workspace IDs
 workspaces = honcho.workspaces()
+
+# Delete a workspace and everything in it (requires no active sessions)
+honcho.delete_workspace(workspace_id)
 ```
 
 ```typescript TypeScript
@@ -218,11 +225,23 @@ const session = await honcho.session(id);
 // List all peers in workspace (returns Page<Peer>)
 const peers = await honcho.peers();
 
+// List with pagination and filtering
+const filtered = await honcho.peers({
+  filters: { metadata: { role: "user" } },
+  page: 1,
+  size: 25,
+  reverse: true
+});
+
 // List all sessions in workspace (returns Page<Session>)
 const sessions = await honcho.sessions();
 
 // Search across all content in workspace (returns Page<any>)
 const results = await honcho.search(query);
+
+// Ask a question across every peer in the workspace
+const answer = await honcho.chat(query);
+const stream = await honcho.chatStream(query);
 
 // Workspace metadata management
 const metadata = await honcho.getMetadata();
@@ -230,12 +249,86 @@ await honcho.setMetadata(metadata);
 
 // Get list of all workspace IDs
 const workspaces = await honcho.workspaces();
+
+// Delete a workspace and everything in it (requires no active sessions)
+await honcho.deleteWorkspace(workspaceId);
 ```
 </CodeGroup>
 
 <Info>
-Peer and session creation is **lazy** - no API calls are made until you actually use the peer or session.
+`peer()` and `session()` always make a get-or-create API call, returning objects with cached metadata, configuration, and timestamps.
 </Info>
+
+### Workspace Chat
+
+`honcho.chat()` asks a question of the whole workspace rather than one peer's representation. It lives on the client, not on `Peer`, and takes no `target`: the agent works out which peers are relevant and reads their memory pair by pair. See [Workspace Chat](/v3/documentation/features/chat#workspace-chat) for when to use it over `peer.chat()`.
+
+<CodeGroup>
+```python Python
+# Cross-peer question
+answer = honcho.chat("What themes appear across all peers this week?")
+
+# Narrow message tools to one session
+answer = honcho.chat("What was decided in this thread?", session="session-1")
+
+# Restrict recall to a scope's member sessions (always an allowlist; mutually exclusive with session)
+answer = honcho.chat("What came up in therapy sessions?", scope="therapy")
+answer = honcho.chat("What came up at intake?", scope=["therapy", "intake"])
+
+# Deeper reasoning
+answer = honcho.chat("Where do peers disagree?", reasoning_level="high")
+
+# Structured output: a Pydantic model returns a parsed instance, a JSON Schema dict returns a JSON string
+result = honcho.chat("List recurring themes", response_format=Themes)
+
+# Streaming
+for chunk in honcho.chat_stream("Summarize the workspace"):
+    print(chunk, end="", flush=True)
+
+# Async mirrors
+answer = await honcho.aio.chat("What themes appear across all peers?")
+async for chunk in await honcho.aio.chat_stream("Summarize the workspace"):
+    print(chunk, end="", flush=True)
+```
+
+```typescript TypeScript
+// Cross-peer question
+const answer = await honcho.chat("What themes appear across all peers this week?");
+
+// Narrow message tools to one session
+const threadAnswer = await honcho.chat("What was decided in this thread?", {
+  session: "session-1"
+});
+
+// Restrict recall to a scope's member sessions (always an allowlist; mutually exclusive with session)
+const scoped = await honcho.chat("What came up in therapy sessions?", { scope: "therapy" });
+const union = await honcho.chat("What came up at intake?", { scope: ["therapy", "intake"] });
+
+// Deeper reasoning
+const deeper = await honcho.chat("Where do peers disagree?", { reasoningLevel: "high" });
+
+// Structured output: pass a JSON Schema object, receive a JSON string
+const raw = await honcho.chat("List recurring themes", {
+  responseFormat: { type: "object", properties: { themes: { type: "array", items: { type: "string" } } }, required: ["themes"] }
+});
+
+// Streaming
+const stream = await honcho.chatStream("Summarize the workspace");
+for await (const chunk of stream) {
+  process.stdout.write(chunk);
+}
+```
+</CodeGroup>
+
+| Option | Python | TypeScript | Notes |
+|--------|--------|------------|-------|
+| Query | `query` (positional) | `query` (positional) | Required, 1 to 10,000 characters |
+| Session | `session=` | `session` | Session ID or object. Narrows message tools only |
+| Scope | `scope=` | `scope` | One name or a list. Always an allowlist; mutually exclusive with session |
+| Reasoning level | `reasoning_level=` | `reasoningLevel` | `minimal`, `low` (default), `medium`, `high`, `max` |
+| Response format | `response_format=` | `responseFormat` | Pydantic model or JSON Schema (Python); JSON Schema (TypeScript) |
+
+Workspace chat requires a workspace- or admin-level key. There is no `target` or `filters` option.
 
 ### Peer
 
@@ -243,7 +336,7 @@ Represents an entity that can participate in conversations:
 
 <CodeGroup>
 ```python Python
-# Create peers (lazy creation - no API call yet)
+# Create peers (get-or-create API call)
 alice = honcho.peer("alice")
 assistant = honcho.peer("assistant")
 
@@ -254,12 +347,16 @@ alice = honcho.peer("bob", config={"role": "user", "active": True}, metadata={"l
 # Peer properties
 print(f"Peer ID: {alice.id}")
 print(f"Workspace: {alice.workspace_id}")
+print(f"Created: {alice.created_at}")  # Available after API fetch
 
 # Chat with peer's representations (supports streaming)
 response = alice.chat("What did I have for breakfast?")
 response = alice.chat("What do I know about Bob?", target="bob")
 response = alice.chat("What happened in session-1?", session="session-1")
 response = alice.chat("Summarize what matters most to me.", reasoning_level="high")
+
+# Override the timeout for one non-streaming dialectic request
+response = alice.chat("Give me a quick summary.", timeout=5.0)
 
 # Add content to a session with a peer
 session = honcho.session("session-1")
@@ -305,6 +402,7 @@ const assistant = await honcho.peer("assistant");
 
 // Peer properties
 console.log(`Peer ID: ${alice.id}`);
+console.log(`Created: ${alice.createdAt}`);  // Available after API fetch
 
 // Chat with peer's representations (supports streaming)
 const response = await alice.chat("What did I have for breakfast?");
@@ -361,6 +459,13 @@ const selfConclusions = await alice.conclusions.list();  // Self-conclusions
 const bobConclusions = await alice.conclusionsOf("bob").list();  // Conclusions of bob
 ```
 </CodeGroup>
+
+For Python, `peer.chat(timeout=...)` and `await peer.aio.chat(timeout=...)`
+accept a timeout in seconds for each HTTP attempt made by one non-streaming
+request. Omit it or pass `None` to use the client-wide timeout configured on
+`Honcho`. Retries still follow the client's `max_retries` setting and can extend
+total elapsed time; use `max_retries=0` when a host shutdown budget permits only
+one attempt.
 
 ### Peer Context
 
@@ -551,7 +656,7 @@ Manages multi-party conversations:
 
 <CodeGroup>
 ```python Python
-# Create session (like peers, lazy creation)
+# Create session (get-or-create API call)
 session = honcho.session("conversation-1")
 
 # Create with immediate configuration
@@ -561,6 +666,8 @@ session = honcho.session("meeting-1", config={"type": "meeting", "max_peers": 10
 # Session properties
 print(f"Session ID: {session.id}")
 print(f"Workspace: {session.workspace_id}")
+print(f"Created: {session.created_at}")  # Available after API fetch
+print(f"Active: {session.is_active}")    # Available after API fetch
 
 # Peer management
 session.add_peers([alice, assistant])
@@ -579,8 +686,12 @@ session.add_messages([
     assistant.message("Hi Alice! How can I help today?")
 ])
 
-# Get messages
+# Get messages (with optional pagination)
 messages = session.messages()
+messages = session.messages(page=1, size=100, reverse=True)
+
+# Get a single message by ID
+message = session.get_message("message-id")
 
 # Get conversation context
 context = session.context(summary=True, tokens=2000)
@@ -641,6 +752,8 @@ const session = await honcho.session("conversation-1");
 
 // Session properties
 console.log(`Session ID: ${session.id}`);
+console.log(`Created: ${session.createdAt}`);  // Available after API fetch
+console.log(`Active: ${session.isActive}`);    // Available after API fetch
 
 // Peer management
 await session.addPeers([alice, assistant]);
@@ -658,8 +771,12 @@ await session.addMessages([
   assistant.message("Hi Alice! How can I help today?")
 ]);
 
-// Get messages
+// Get messages (with optional pagination)
 const messages = await session.messages();
+const paged = await session.messages({ page: 1, size: 100, reverse: true });
+
+// Get a single message by ID
+const message = await session.getMessage("message-id");
 
 // Get conversation context
 const context = await session.context({ summary: true, tokens: 2000 });
@@ -668,10 +785,10 @@ const context = await session.context({ summary: true, tokens: 2000 });
 const richContext = await session.context({
   tokens: 2000,
   peerTarget: "user",
-  searchQuery: "What are my preferences?",
   peerPerspective: "assistant",
   limitToSession: true,
   representationOptions: {
+    searchQuery: "What are my preferences?",
     searchTopK: 10,
     searchMaxDistance: 0.8,
     includeMostFrequent: true,
@@ -729,7 +846,7 @@ const metadata = await session.getMetadata();
 
 <CodeGroup>
 ```python Python
-from honcho import SessionPeerConfig
+from honcho.api_types import SessionPeerConfig
 
 # Configure peer observation settings
 config = SessionPeerConfig(
@@ -811,12 +928,12 @@ The SessionContext object has the following structure:
 | `tokens` | `int` | Maximum tokens to include |
 | `peer_target` | `str` | Peer ID to get representation for |
 | `peer_perspective` | `str` | Peer ID for perspective (requires peer_target) |
-| `search_query` | `str` or `Message` | Query string or Message object for semantic search |
 | `limit_to_session` | `bool` | Limit representation to session only |
-| `search_top_k` | `int` | Number of semantic search results (1-100) |
-| `search_max_distance` | `float` | Max semantic distance (0.0-1.0) |
-| `include_most_frequent` | `bool` | Include most frequent conclusions |
-| `max_conclusions` | `int` | Max conclusions to include (1-100) |
+| `representationOptions.searchQuery` | `str` or `Message` | Query string or Message object for semantic search |
+| `representationOptions.searchTopK` | `int` | Number of semantic search results (1-100) |
+| `representationOptions.searchMaxDistance` | `float` | Max semantic distance (0.0-1.0) |
+| `representationOptions.includeMostFrequent` | `bool` | Include most frequent conclusions |
+| `representationOptions.maxConclusions` | `int` | Max conclusions to include (1-100) |
 
 ## Advanced Usage
 
@@ -988,23 +1105,46 @@ const actionItems = await session.messages({
 
 ### Pagination
 
+All list methods support `page`, `size`, and `reverse` parameters:
+
 <CodeGroup>
 ```python Python
-# Iterate through all sessions
+# Default pagination (page 1, size 50)
 for session in honcho.sessions():
     print(f"Session: {session.id}")
 
-    # Iterate through session messages
-    for message in session.messages():
-        print(f"  {message.peer_id}: {message.content}")
+# Custom page size
+for message in session.messages(size=100):
+    print(f"  {message.peer_id}: {message.content}")
+
+# Start at a specific page
+page3 = session.messages(page=3, size=25)
+
+# Reverse ordering
+recent_first = session.messages(reverse=True)
+
+# Combine with filters
+filtered = session.messages(filters={"peer_id": "alice"}, size=10)
 ```
 
 ```typescript TypeScript
-// Get paginated results
+// Default pagination (page 1, size 50)
 const peersPage = await honcho.peers();
 
-// Iterate through all items
-for await (const peer of peersPage) {
+// Custom page size and filtering
+const filtered = await honcho.peers({
+  filters: { metadata: { role: "user" } },
+  size: 25
+});
+
+// Start at a specific page
+const page3 = await session.messages({ page: 3, size: 25 });
+
+// Reverse ordering
+const recent = await session.messages({ reverse: true });
+
+// Iterate through all items (auto-paginates)
+for await (const peer of await honcho.peers()) {
   console.log(`Peer: ${peer.id}`);
 }
 
@@ -1048,8 +1188,8 @@ const supportAgent = await honcho.peer(`agent-${agentId}`);
 
 <CodeGroup>
 ```python Python
-# Lazy creation - no API calls until needed
-peers = [honcho.peer(f"user-{i}") for i in range(100)]  # Fast
+# Create peers (each makes a get-or-create call)
+peers = [honcho.peer(f"user-{i}") for i in range(100)]
 
 # Batch operations when possible
 session.add_messages([peer.message(f"Message {i}") for i, peer in enumerate(peers)])
@@ -1059,7 +1199,7 @@ context = session.context(tokens=1500)  # Limit context size
 ```
 
 ```typescript TypeScript
-// Lazy creation - no API calls until needed
+// Create peers (each makes a get-or-create call)
 const peers = await Promise.all(
   Array.from({ length: 100 }, (_, i) => honcho.peer(`user-${i}`))
 );
