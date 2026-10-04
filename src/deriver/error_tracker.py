@@ -15,13 +15,24 @@ from src.config import settings
 
 @dataclass
 class ErrorRecord:
-    """Tracks retry state for a single work unit."""
+    """Tracks retry state for a single work unit.
+
+    ``escalate`` is decided atomically inside ``record_error`` rather than
+    re-derived from the record afterwards, so the escalation decision cannot
+    be flipped by another worker between the write and the read.
+
+    ``retry_count`` is capped at ``max_retries`` (it is the retry budget that
+    is left, not a raw tally); ``attempts`` is the uncapped number of failures
+    observed for this record and is only for logging.
+    """
 
     first_seen: datetime
     last_seen: datetime
     retry_count: int
     last_error: str
     backoff_until: datetime  # cooldown period
+    escalate: bool = False  # retries exhausted: mark permanently errored
+    attempts: int = 0  # uncapped failure tally, logging only
 
 
 class WorkUnitErrorTracker:
@@ -49,6 +60,11 @@ class WorkUnitErrorTracker:
         self._records: dict[str, ErrorRecord] = {}
         self._lock = threading.Lock()
 
+    @property
+    def max_retries(self) -> int:
+        """Retry budget per work unit, for logging and tests."""
+        return self._max_retries
+
     # ---- Public API ----
 
     def record_error(self, work_unit_key: str, error: str) -> ErrorRecord:
@@ -56,24 +72,35 @@ class WorkUnitErrorTracker:
 
         If the work unit was previously cleared (success then failure again),
         the retry count resets to 1.
+
+        The escalation decision is made here, in the same lock-protected step
+        as the write, and returned on the record. Once the retry budget is used
+        up there is no cooldown left to wait for, so ``backoff_until`` is set to
+        ``now`` instead of a future timestamp; otherwise the record would stay
+        backed off forever and the permanent-failure branch could never run.
         """
         now = datetime.now(timezone.utc)
         with self._lock:
             existing = self._records.get(work_unit_key)
             if existing is None:
-                retry_count = 1
+                attempts = 1
                 first_seen = now
             else:
-                retry_count = existing.retry_count + 1
+                attempts = existing.attempts + 1
                 first_seen = existing.first_seen
 
-            backoff = self._calculate_backoff(retry_count)
+            retry_count = min(attempts, self._max_retries)
+            escalate = retry_count >= self._max_retries
+            backoff = 0.0 if escalate else self._calculate_backoff(retry_count)
+
             record = ErrorRecord(
                 first_seen=first_seen,
                 last_seen=now,
                 retry_count=retry_count,
                 last_error=error,
                 backoff_until=now + timedelta(seconds=backoff),
+                escalate=escalate,
+                attempts=attempts,
             )
             self._records[work_unit_key] = record
             return record
@@ -100,20 +127,22 @@ class WorkUnitErrorTracker:
             self._records.pop(work_unit_key, None)
 
     def should_escalate(self, work_unit_key: str) -> bool:
-        """True if error is exhausted AND backoff has expired.
+        """True if the record's atomic escalation decision is in effect.
 
-        This means the work unit has used all retries and the last backoff
-        period has elapsed, so it should be permanently marked as errored
-        in the database.
+        Thin accessor over ``record.escalate`` (computed in ``record_error``).
+        The cooldown comparison is kept so a record that is still in backoff
+        reads as "not yet", but for an exhausted record ``backoff_until`` is
+        ``last_seen`` and this returns True immediately.
+
+        Prefer the ``escalate`` field on the record returned by ``record_error``
+        at call sites that just wrote the record: it avoids a second lock
+        acquisition that another worker's ``clear()`` could race with.
         """
         with self._lock:
             record = self._records.get(work_unit_key)
             if record is None:
                 return False
-            return (
-                record.retry_count >= self._max_retries
-                and datetime.now(timezone.utc) >= record.backoff_until
-            )
+            return record.escalate and datetime.now(timezone.utc) >= record.backoff_until
 
     def cleanup_expired(self) -> int:
         """Remove records older than TTL to prevent unbounded growth.

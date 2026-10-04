@@ -1,5 +1,5 @@
 # Vector Search vs RRF Hybrid Search Comparison Report
-**Generated:** 2026-04-09 19:04:25
+**Generated:** 2026-10-01 10:30:22
 **Test Database:** honcho_dev
 
 ## Executive Summary
@@ -25,9 +25,9 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 ### Vector-Only Search Results
 | Rank | Document |
 |------|----------|
-| 1 | The user needs help fixing database connectoin issues |
-| 2 | Database connection pooling configuration |
-| 3 | Connection strings and authentication |
+| 1 | Database connection pooling configuration |
+| 2 | Connection strings and authentication |
+| 3 | The user needs help fixing database connectoin issues |
 | 4 | PostgreSQL database performance optimization |
 
 ### RRF Hybrid Search Results
@@ -64,18 +64,18 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 ### Vector-Only Search Results
 | Rank | Document |
 |------|----------|
-| 1 | API key security best practices |
-| 2 | Secure API endpoint configuration guide |
-| 3 | Authentication tokens and credential management system |
-| 4 | REST API documentation and examples |
+| 1 | Authentication tokens and credential management system |
+| 2 | REST API documentation and examples |
+| 3 | API key security best practices |
+| 4 | Secure API endpoint configuration guide |
 
 ### RRF Hybrid Search Results
 | Rank | Document |
 |------|----------|
 | 1 | API key security best practices |
-| 2 | Secure API endpoint configuration guide |
-| 3 | Authentication tokens and credential management system |
-| 4 | REST API documentation and examples |
+| 2 | Authentication tokens and credential management system |
+| 3 | REST API documentation and examples |
+| 4 | Secure API endpoint configuration guide |
 
 ### Analysis
 - **Vector search returned:** 4 results
@@ -85,7 +85,7 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 **Key Observations:**
 
 - **Overlap in results** shows documents that are both semantically similar and textually relevant.
-- **Ranking differences:** Documents appearing in both lists have an average rank difference of 0.0 positions. RRF re-ranks based on combined evidence.
+- **Ranking differences:** Documents appearing in both lists have an average rank difference of 1.0 positions. RRF re-ranks based on combined evidence.
 
 
 ---
@@ -103,9 +103,9 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 ### Vector-Only Search Results
 | Rank | Document |
 |------|----------|
-| 1 | Webhook integration setup instructions |
+| 1 | Event-driven architecture using webhooks |
 | 2 | Third-party webhook configuration |
-| 3 | Event-driven architecture using webhooks |
+| 3 | Webhook integration setup instructions |
 | 4 | API integration patterns and best practices |
 
 ### RRF Hybrid Search Results
@@ -124,7 +124,7 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 **Key Observations:**
 
 - **Overlap in results** shows documents that are both semantically similar and textually relevant.
-- **Ranking differences:** Documents appearing in both lists have an average rank difference of 0.0 positions. RRF re-ranks based on combined evidence.
+- **Ranking differences:** Documents appearing in both lists have an average rank difference of 1.0 positions. RRF re-ranks based on combined evidence.
 
 
 ---
@@ -142,18 +142,18 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 ### Vector-Only Search Results
 | Rank | Document |
 |------|----------|
-| 1 | User prefers dark mode interface settings |
-| 2 | Light mode vs dark mode comparison |
-| 3 | Accessibility settings for visual preferences |
-| 4 | Theme configuration and appearance options |
+| 1 | Accessibility settings for visual preferences |
+| 2 | Theme configuration and appearance options |
+| 3 | Light mode vs dark mode comparison |
+| 4 | User prefers dark mode interface settings |
 
 ### RRF Hybrid Search Results
 | Rank | Document |
 |------|----------|
 | 1 | User prefers dark mode interface settings |
-| 2 | Light mode vs dark mode comparison |
-| 3 | Accessibility settings for visual preferences |
-| 4 | Theme configuration and appearance options |
+| 2 | Accessibility settings for visual preferences |
+| 3 | Theme configuration and appearance options |
+| 4 | Light mode vs dark mode comparison |
 
 ### Analysis
 - **Vector search returned:** 4 results
@@ -163,7 +163,7 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 **Key Observations:**
 
 - **Overlap in results** shows documents that are both semantically similar and textually relevant.
-- **Ranking differences:** Documents appearing in both lists have an average rank difference of 0.0 positions. RRF re-ranks based on combined evidence.
+- **Ranking differences:** Documents appearing in both lists have an average rank difference of 1.5 positions. RRF re-ranks based on combined evidence.
 
 
 ---
@@ -181,17 +181,17 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 ### Vector-Only Search Results
 | Rank | Document |
 |------|----------|
-| 1 | Vector similarity search implementation in PostgreSQL |
+| 1 | Full-text search configuration guide |
 | 2 | Semantic search and embeddings overview |
-| 3 | Full-text search configuration guide |
+| 3 | Vector similarity search implementation in PostgreSQL |
 | 4 | pgvector extension for nearest neighbor queries |
 
 ### RRF Hybrid Search Results
 | Rank | Document |
 |------|----------|
 | 1 | Vector similarity search implementation in PostgreSQL |
-| 2 | Semantic search and embeddings overview |
-| 3 | Full-text search configuration guide |
+| 2 | Full-text search configuration guide |
+| 3 | Semantic search and embeddings overview |
 | 4 | pgvector extension for nearest neighbor queries |
 
 ### Analysis
@@ -202,7 +202,7 @@ This report compares traditional **vector-only semantic search** with **RRF (Rec
 **Key Observations:**
 
 - **Overlap in results** shows documents that are both semantically similar and textually relevant.
-- **Ranking differences:** Documents appearing in both lists have an average rank difference of 0.0 positions. RRF re-ranks based on combined evidence.
+- **Ranking differences:** Documents appearing in both lists have an average rank difference of 1.0 positions. RRF re-ranks based on combined evidence.
 
 
 ---

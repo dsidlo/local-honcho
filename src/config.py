@@ -831,6 +831,13 @@ class AppSettings(HonchoSettings):
     # Application-wide settings
     LOG_LEVEL: str = "INFO"
     HONCHO_PORT: int = 8000
+
+    # IP restriction settings for API access control
+    # Comma-separated list of allowed CIDR networks (e.g., "127.0.0.0/8,172.20.0.0/24")
+    # Empty or None means allow all IPs (default behavior for backward compatibility)
+    ALLOWED_IP_NETWORKS: str | None = None
+    # Paths that bypass IP restriction (e.g., health checks)
+    IP_RESTRICTION_EXCLUDED_PATHS: list[str] = Field(default_factory=lambda: ["/health", "/metrics", "/docs", "/openapi.json"])
     SESSION_OBSERVERS_LIMIT: Annotated[int, Field(default=10, gt=0)] = 10
     MAX_FILE_SIZE: Annotated[int, Field(default=5_242_880, gt=0)] = 5_242_880  # 5MB
     GET_CONTEXT_MAX_TOKENS: Annotated[int, Field(default=100_000, gt=0, le=250_000)] = (

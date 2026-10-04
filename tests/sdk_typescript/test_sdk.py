@@ -59,14 +59,14 @@ def test_typescript_sdk(ts_test_server: str):
         timeout=600,  # 10 minute timeout (310 tests incl. real LLM calls)
     )
 
-    # Print output for debugging
+    # Print output for debugging (stdout carries the bun test summary; stderr
+    # only server noise. Printing both helps diagnose intermittent LLM failures)
     if result.stdout:
-        print("\n=== TypeScript SDK Test Output ===")
-        print(result.stdout)
+        print("\n=== TypeScript SDK Test Output ===\n" + result.stdout)
 
     if result.returncode != 0:
-        print("\n=== TypeScript SDK Test Errors ===")
-        print(result.stderr)
+        if result.stderr:
+            print("\n=== TypeScript SDK Test Errors ===\n" + result.stderr)
         pytest.fail(f"TypeScript SDK tests failed with exit code {result.returncode}")
 
 

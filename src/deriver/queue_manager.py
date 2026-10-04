@@ -750,11 +750,14 @@ class QueueManager:
         """Handle processing errors using the retry/error tracker.
 
         Decision logic:
-        1. Record the error in the in-memory tracker.
-        2. If retries are exhausted AND backoff has expired:
-           - Permanently mark the first queue item as errored
+        1. Record the error in the in-memory tracker. The record returned by
+           ``record_error`` already carries the escalation decision, so the
+           branch reads it off that record instead of looking the tracker up
+           a second time.
+        2. If retries are exhausted:
+           - Permanently mark every queue item as errored
              (``processed=True, error=...``).
-        3. Otherwise (retries remain or still in backoff):
+        3. Otherwise (retries remain):
            - Reset queue items to ``processed=False`` so they can be
              re-claimed after the backoff period.
 
@@ -771,25 +774,27 @@ class QueueManager:
 
         logger.error(
             f"Error {context} for work unit {work_unit_key}: {error} "
-            f"[retry {record.retry_count}/{self.error_tracker._max_retries}]",
+            f"[attempt {record.attempts}/{self.error_tracker.max_retries}]",
             exc_info=True,
         )
 
         if settings.SENTRY.ENABLED:
             sentry_sdk.capture_exception(error)
 
-        # Decide: retry or permanently fail?
-        if self.error_tracker.should_escalate(work_unit_key):
-            # Exhausted all retries AND backoff expired → permanent failure
+        # Decide: retry or permanently fail? The decision is carried on the
+        # record written above, so no second tracker lookup is needed.
+        if record.escalate:
+            # Retries exhausted → permanent failure
             logger.warning(
-                f"Work unit {work_unit_key} exhausted {record.retry_count} retries, "
+                f"Work unit {work_unit_key} exhausted {self.error_tracker.max_retries} retries, "
                 f"marking as permanently errored"
             )
             try:
-                if items:
-                    await self.mark_queue_item_as_errored(
-                        items[0], work_unit_key, error_msg
-                    )
+                # Mark every item as errored so the work unit can never be
+                # re-claimed again. Marking only items[0] left the rest unprocessed,
+                # which kept the work unit alive and looped forever.
+                for item in items:
+                    await self.mark_queue_item_as_errored(item, work_unit_key, error_msg)
             except Exception as mark_error:
                 logger.error(
                     f"Failed to mark queue items as errored for work unit {work_unit_key}: {mark_error}",
@@ -797,10 +802,10 @@ class QueueManager:
                 )
         else:
             # Retries remain → reset items to unprocessed for re-claim after backoff
-            backoff_remaining = (record.backoff_until - datetime.now(timezone.utc)).total_seconds()
+            backoff_remaining = (record.backoff_until - record.last_seen).total_seconds()
             logger.info(
                 f"Work unit {work_unit_key} will be retried "
-                f"(attempt {record.retry_count}/{self.error_tracker._max_retries}, "
+                f"(attempt {record.attempts}/{self.error_tracker.max_retries}, "
                 f"backoff {backoff_remaining:.1f}s)"
             )
             try:

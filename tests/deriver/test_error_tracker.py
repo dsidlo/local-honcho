@@ -92,20 +92,35 @@ class TestWorkUnitErrorTracker:
         tracker = WorkUnitErrorTracker(max_retries=3, base_backoff=1.0, max_backoff=60.0, ttl=3600.0)
         tracker.clear("nonexistent")  # Should not raise
 
-    def test_should_escalate_when_exhausted_and_backoff_expired(self):
-        tracker = WorkUnitErrorTracker(max_retries=2, base_backoff=0.01, max_backoff=0.1, ttl=3600.0)
+    def test_should_escalate_immediately_when_exhausted(self):
+        """Escalation is reachable on the production path: no sleep, no cooldown left.
+
+        The old shape of this test asserted the opposite (escalation only after
+        the backoff expired). That is the state production never reaches: the
+        call site reads the record immediately after writing it, and the record
+        carried a strictly-future cooldown. With the fix, an exhausted record
+        sets ``backoff_until == last_seen`` so the decision is true right away.
+        """
+        tracker = WorkUnitErrorTracker(max_retries=2, base_backoff=1.0, max_backoff=60.0, ttl=3600.0)
 
         tracker.record_error("wu:1", "error 1")
-        tracker.record_error("wu:1", "error 2")
+        record = tracker.record_error("wu:1", "error 2")
 
-        # Should not escalate yet (still in backoff)
-        assert tracker.should_escalate("wu:1") is False
-
-        # Wait for backoff to expire
-        time.sleep(0.05)
-
-        # Now should escalate
+        # Retries used up -> escalate immediately, no sleep in between.
         assert tracker.should_escalate("wu:1") is True
+        assert record.escalate is True
+        assert record.backoff_until == record.last_seen
+
+    def test_escalation_decision_on_returned_record(self):
+        """The record returned by ``record_error`` carries the decision atomically."""
+        tracker = WorkUnitErrorTracker(max_retries=2, base_backoff=1.0, max_backoff=60.0, ttl=3600.0)
+
+        first = tracker.record_error("wu:1", "error 1")
+        assert first.escalate is False
+        assert first.backoff_until > first.last_seen
+
+        second = tracker.record_error("wu:1", "error 2")
+        assert second.escalate is True
 
     def test_should_not_escalate_with_retries_remaining(self):
         tracker = WorkUnitErrorTracker(max_retries=3, base_backoff=0.01, max_backoff=0.1, ttl=3600.0)
@@ -188,6 +203,20 @@ class TestWorkUnitErrorTracker:
         assert tracker.get_record("wu:2").retry_count == 1
         assert tracker.get_record("wu:1").last_error == "error A"
         assert tracker.get_record("wu:2").last_error == "error B"
+
+    def test_retry_count_bounded_by_max_retries(self):
+        """``retry_count`` stops at the cap; ``attempts`` keeps counting for logging."""
+        tracker = WorkUnitErrorTracker(max_retries=3, base_backoff=1.0, max_backoff=60.0, ttl=3600.0)
+
+        for expected_attempts in range(1, 6):
+            record = tracker.record_error("wu:1", f"error {expected_attempts}")
+            assert record.attempts == expected_attempts
+            assert record.retry_count == min(expected_attempts, 3)
+
+        # Past the cap the record stays exhausted and never re-arms a cooldown.
+        assert tracker.is_exhausted("wu:1") is True
+        assert tracker.should_escalate("wu:1") is True
+        assert tracker.is_backed_off("wu:1") is False
 
     def test_uses_settings_defaults(self):
         """Tracker should pick up settings from DeriverRetrySettings if no overrides."""

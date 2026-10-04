@@ -19,6 +19,7 @@ from src.cache.client import close_cache, init_cache
 from src.config import settings
 from src.db import engine, request_context
 from src.exceptions import HonchoException
+from src.middleware.ip_filter import IPRestrictionMiddleware
 from src.routers import (
     conclusions,
     keys,
@@ -180,6 +181,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add IP restriction middleware if ALLOWED_IP_NETWORKS is configured
+if settings.ALLOWED_IP_NETWORKS:
+    allowed_networks = [net.strip() for net in settings.ALLOWED_IP_NETWORKS.split(",") if net.strip()]
+    if allowed_networks:
+        app.add_middleware(
+            IPRestrictionMiddleware,
+            allowed_networks=allowed_networks,
+            excluded_paths=settings.IP_RESTRICTION_EXCLUDED_PATHS,
+        )
+        logger.info(f"IP restriction enabled for networks: {allowed_networks}")
 
 
 add_pagination(app)
