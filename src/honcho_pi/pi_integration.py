@@ -1,9 +1,10 @@
 """Pi extension integration for Honcho."""
 
 import json
+import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from rich.console import Console
 
@@ -83,7 +84,7 @@ DEFAULT_HONCHO_SETTINGS = {
 class PiIntegration:
     """Manages Pi extension integration."""
     
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Settings | None = None):
         """Initialize Pi integration.
         
         Args:
@@ -104,7 +105,7 @@ class PiIntegration:
         """Get path where honcho.ts should be installed."""
         return self.settings.pi_extensions_dir / "honcho.ts"
     
-    def read_pi_settings(self) -> dict:
+    def read_pi_settings(self) -> dict[str, Any]:
         """Read current Pi settings."""
         settings_path = self.get_pi_settings_path()
         if not settings_path.exists():
@@ -114,9 +115,9 @@ class PiIntegration:
             with open(settings_path) as f:
                 return json.load(f)
         except json.JSONDecodeError as e:
-            raise PiIntegrationError(f"Invalid JSON in Pi settings: {e}")
+            raise PiIntegrationError(f"Invalid JSON in Pi settings: {e}") from e
     
-    def write_pi_settings(self, settings: dict, backup: bool = True):
+    def write_pi_settings(self, settings: dict[str, Any], backup: bool = True):
         """Write Pi settings.
         
         Args:
@@ -140,7 +141,7 @@ class PiIntegration:
         
         console.print(f"[dim]Wrote Pi settings to {settings_path}[/dim]")
     
-    def merge_honcho_settings(self, settings: Optional[dict] = None) -> dict:
+    def merge_honcho_settings(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
         """Merge Honcho settings into Pi settings.
         
         Args:
@@ -277,9 +278,9 @@ class PiIntegration:
         try:
             # Try pkill first
             import subprocess
-            result = subprocess.run(
+            subprocess.run(
                 ["pkill", "-f", "pi-mono"],
-                capture_output=True
+                capture_output=True,
             )
             
             # Wait for restart
@@ -296,19 +297,19 @@ class PiIntegration:
 
 
 # Convenience functions
-def install_pi_extension(settings: Optional[Settings] = None) -> bool:
+def install_pi_extension(settings: Settings | None = None) -> bool:
     """Install Pi extension (convenience function)."""
     integration = PiIntegration(settings)
     return integration.install_extension()
 
 
-def uninstall_pi_extension(settings: Optional[Settings] = None) -> bool:
+def uninstall_pi_extension(settings: Settings | None = None) -> bool:
     """Uninstall Pi extension (convenience function)."""
     integration = PiIntegration(settings)
     return integration.uninstall_extension()
 
 
-def check_pi_status(settings: Optional[Settings] = None) -> dict:
+def check_pi_status(settings: Settings | None = None) -> dict[str, Any]:
     """Check Pi extension status.
     
     Returns:
@@ -326,12 +327,12 @@ def check_pi_status(settings: Optional[Settings] = None) -> dict:
     
     errors = integration.validate_extension()
     extension_path = integration.get_honcho_extension_path()
-    settings = integration.read_pi_settings()
-    
+    pi_settings = integration.read_pi_settings()
+
     return {
         "installed": True,
         "extension_present": extension_path.exists(),
-        "settings_configured": "honcho" in settings,
+        "settings_configured": "honcho" in pi_settings,
         "errors": errors,
-        "api_url": settings.get("honcho", {}).get("api_url")
+        "api_url": pi_settings.get("honcho", {}).get("api_url"),
     }

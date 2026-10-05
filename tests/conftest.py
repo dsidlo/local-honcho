@@ -170,6 +170,18 @@ def pytest_configure(config: pytest.Config) -> None:  # pyright: ignore[reportUn
     if os.environ.get("PYTEST_XDIST_WORKER") is None:
         _sweep_stale_test_databases()
 
+    # A developer's .env carries local deployment pins (WRR scheduling,
+    # FLUSH_ENABLED, batch thresholds) that leak into tests asserting the
+    # FIFO/token-threshold behavior: src.config calls load_dotenv(override=True)
+    # when imported, which stomps CLI-set env vars. Tests import src.config
+    # through the fixtures, so neutralize the pins unless the operator pinned
+    # them deliberately for this run.
+    for _pin in (
+        "DERIVER__WRR__ENABLED",
+        "DERIVER__FLUSH_ENABLED",
+    ):
+        os.environ.pop(_pin, None)
+
 
 def _get_test_db_url(worker_id: str) -> URL:
     """Get a worker-specific test database URL for pytest-xdist parallelism."""
@@ -300,6 +312,11 @@ async def setup_test_database(db_url: URL):
             raise RuntimeError(
                 "Failed to create pgvector extension. Make sure it's installed on the PostgreSQL server."
             ) from e
+        try:
+            logger.info("Attempting to create pg_trgm extension (hybrid search)...")
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+            await conn.commit()
+            logger.info("pg_trgm extension created successfully.")
         except OperationalError as e:
             logger.error(f"OperationalError: {e}")
             raise RuntimeError(
@@ -1010,6 +1027,29 @@ def enable_deriver_for_tests(request: pytest.FixtureRequest):
     settings.DERIVER.ENABLED = True
     yield
     settings.DERIVER.ENABLED = original_value
+
+
+@pytest.fixture(autouse=True)
+def pin_fifo_queue_scheduling(request: pytest.FixtureRequest):
+    """Pin FIFO queue scheduling for runtime tests.
+
+    A developer's .env enables WRR scheduling (DERIVER__WRR__ENABLED=true)
+    for local deployment; load_dotenv(override=True) in src/config.py applies
+    it before the CLI env can win. The queue-processing suite asserts the
+    FIFO/token-threshold path, so pin WRR off here, after settings exist and
+    before each test runs. WRR-specific behavior is covered by its own suites
+    (test_wrr_*.py), which set WRR.ENABLED directly where they need it.
+    """
+    if not _requires_runtime_mocks(_get_nodeid(request)):
+        yield
+        return
+
+    from src.config import settings
+
+    original_value = settings.DERIVER.WRR.ENABLED
+    settings.DERIVER.WRR.ENABLED = False
+    yield
+    settings.DERIVER.WRR.ENABLED = original_value
 
 
 @pytest.fixture(autouse=True)

@@ -169,6 +169,20 @@ def _b_card_target(c: TestClient, ws: str, _s: str, p: str):
     )
 
 
+def _b_doc_search_observer(c: TestClient, ws: str, _s: str, p: str):
+    return c.post(
+        f"/v3/workspaces/{ws}/documents/search",
+        json={"query": "hi", "observer": p, "observed": _OTHER},
+    )
+
+
+def _b_doc_search_observed(c: TestClient, ws: str, _s: str, p: str):
+    return c.post(
+        f"/v3/workspaces/{ws}/documents/search",
+        json={"query": "hi", "observer": _OTHER, "observed": p},
+    )
+
+
 def _b_conclusion_observed(c: TestClient, ws: str, _s: str, p: str):
     return c.post(
         f"/v3/workspaces/{ws}/conclusions",
@@ -559,6 +573,32 @@ POLICY: tuple[Case, ...] = (
         build=_b_repr_observer,
     ),
     # ---- reads that neither create nor mutate knowledge about a scope ----
+    # Hybrid document search (local fork): read-only over stored conclusions.
+    # No guard at the call site; an absent name simply matches zero rows, so an
+    # unflagged reserved name also gets a 200 with an empty result set.
+    Case(
+        "POST",
+        f"{_W}/documents/search",
+        "observer",
+        False,
+        reason=_READ_ONLY_OK,
+        build=_b_doc_search_observer,
+        allow_status=(200,),
+    ),
+    Case(
+        "POST",
+        f"{_W}/documents/search",
+        "observed",
+        False,
+        reason=(
+            "Read-only. Returns documents FROM stored rows so it can never create "
+            "knowledge about a scope; the write side of the invariant lives on the "
+            "conclusion create path (reject_scope_observed). Matches rows only for "
+            "an (observer, observed) pair that already exists."
+        ),
+        build=_b_doc_search_observed,
+        allow_status=(200,),
+    ),
     Case(
         "POST", f"{_W}/peers/{{peer_id}}/search", "peer_id", False, reason=_READ_ONLY_OK
     ),
@@ -758,8 +798,9 @@ def test_policy_entries_are_well_formed():
                 f"{case.key}: an allow case needs a builder and an expected "
                 "allow_status together, or neither"
             )
-            assert case.refuse_missing is None, (
-                f"{case.key}: refuse_missing applies to REFUSE cases only"
+            assert not case.refuse_missing and not case.missing_status, (
+                f"{case.key}: refuse_missing/missing_status apply to REFUSE cases "
+                "only; a permissive ALLOW case states its tolerance in its reason"
             )
 
 

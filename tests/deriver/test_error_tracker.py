@@ -219,8 +219,12 @@ class TestWorkUnitErrorTracker:
         assert tracker.is_backed_off("wu:1") is False
 
     def test_uses_settings_defaults(self):
-        """Tracker should pick up settings from DeriverRetrySettings if no overrides."""
-        from src.config import settings
+        """Tracker falls back to built-in defaults when DERIVER.RETRY is absent.
+
+        Upstream moved retry bookkeeping onto the queue item payload, so the
+        pi-dev DeriverRetrySettings block no longer exists on the merged tree;
+        the tracker stays usable standalone with its own defaults.
+        """
         tracker = WorkUnitErrorTracker()
-        assert tracker._max_retries == settings.DERIVER.RETRY.MAX_RETRIES
-        assert tracker._base_backoff == settings.DERIVER.RETRY.BASE_BACKOFF_SEC
+        assert tracker._max_retries == 3
+        assert tracker._base_backoff == 5.0

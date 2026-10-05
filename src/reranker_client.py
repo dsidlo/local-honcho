@@ -45,9 +45,9 @@ class _RerankerClient:
     async def rerank(
         self,
         query: str,
-        documents: list,
+        documents: "list[models.Document]",
         top_k: int | None = None,
-    ) -> list:
+    ) -> "list[models.Document]":
         """
         Re-rank documents using cross-encoder.
 
@@ -91,9 +91,9 @@ class _RerankerClient:
     async def _rerank_ollama(
         self,
         query: str,
-        documents: list,
+        documents: "list[models.Document]",
         top_k: int,
-    ) -> list:
+    ) -> "list[models.Document]":
         """
         Re-rank using Ollama API.
 
@@ -137,8 +137,8 @@ class _RerankerClient:
 
         # Sort documents by score and return top_k
         scored_docs = [
-            RerankedDocument(doc=doc, score=float(score))
-            for doc, score in zip(documents, scores)
+            RerankedDocument(document=doc, score=float(score))
+            for doc, score in zip(documents, scores, strict=False)
         ]
         scored_docs.sort(key=lambda x: x.score, reverse=True)
 
@@ -153,9 +153,9 @@ class _RerankerClient:
         self,
         client: httpx.AsyncClient,
         query: str,
-        documents: list,
+        documents: "list[models.Document]",
         top_k: int,
-    ) -> list:
+    ) -> "list[models.Document]":
         """
         Fallback: use embeddings similarity if rerank endpoint not available.
 
@@ -200,8 +200,8 @@ class _RerankerClient:
 
         # Sort and return top_k
         scored_docs = [
-            RerankedDocument(doc=doc, score=score)
-            for doc, score in zip(documents, scores)
+            RerankedDocument(document=doc, score=score)
+            for doc, score in zip(documents, scores, strict=False)
         ]
         scored_docs.sort(key=lambda x: x.score, reverse=True)
 
@@ -223,9 +223,9 @@ def get_reranker_client() -> _RerankerClient:
 # Module-level convenience function
 async def rerank_documents(
     query: str,
-    documents: list,
+    documents: "list[models.Document]",
     top_k: int | None = None,
-) -> list:
+) -> "list[models.Document]":
     """
     Convenience function to rerank documents.
 

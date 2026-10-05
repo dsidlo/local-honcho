@@ -8,9 +8,12 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request, status
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse, Response
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
+
+    from starlette.types import ASGIApp
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +27,7 @@ class IPRestrictionMiddleware(BaseHTTPMiddleware):
 
     def __init__(
         self,
-        app: object,
+        app: ASGIApp,
         allowed_networks: list[str] | None = None,
         excluded_paths: list[str] | None = None,
     ) -> None:
@@ -46,8 +49,8 @@ class IPRestrictionMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self,
         request: Request,
-        call_next: "Callable[..., object]",
-    ) -> object:
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         """Process the request and check IP restrictions.
 
         Args:
@@ -92,7 +95,7 @@ class IPRestrictionMiddleware(BaseHTTPMiddleware):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid client IP address",
-            )
+            ) from None
 
         # Check if client IP is in any allowed network
         allowed = any(client_ip in network for network in self.allowed_networks)
@@ -102,9 +105,11 @@ class IPRestrictionMiddleware(BaseHTTPMiddleware):
                 f"Access denied for IP {client_host} - not in allowed networks: "
                 f"{[str(n) for n in self.allowed_networks]}"
             )
-            raise HTTPException(
+            # Returning the response directly (rather than raising HTTPException)
+            # so BaseHTTPMiddleware does not convert it into a 500.
+            return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: IP not in allowed range",
+                content={"detail": "Access denied: IP not in allowed range"},
             )
 
         return await call_next(request)

@@ -1,9 +1,9 @@
 """Systemd service management for Honcho Pi."""
 
+import contextlib
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from rich.console import Console
 
@@ -71,7 +71,7 @@ WantedBy=default.target
 class ServiceManager:
     """Manages systemd user services for Honcho."""
     
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Settings | None = None):
         """Initialize service manager.
         
         Args:
@@ -93,8 +93,8 @@ class ServiceManager:
         for path in [
             Path.home() / ".cargo" / "bin" / "uv",
             Path.home() / ".local" / "bin" / "uv",
-            Path("/usr" / "local" / "bin" / "uv"),
-            Path("/usr" / "bin" / "uv"),
+            Path("/usr/local/bin/uv"),
+            Path("/usr/bin/uv"),
         ]:
             if path.exists():
                 return str(path)
@@ -260,13 +260,13 @@ class ServiceManager:
             console.print(f"[red]Failed to restart services: {e}[/red]")
             return False
     
-    def get_status(self) -> dict:
+    def get_status(self) -> dict[str, str | bool]:
         """Get status of all services.
         
         Returns:
             Dictionary with service status information
         """
-        status = {
+        status: dict[str, str | bool] = {
             "honcho-api": self._get_service_status("honcho-api"),
             "honcho-deriver": self._get_service_status("honcho-deriver"),
         }
@@ -341,7 +341,5 @@ def get_journal_logs(service: str, lines: int = 50, follow: bool = False) -> Non
     if follow:
         cmd.append("-f")
     
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         subprocess.run(cmd, check=False)
-    except KeyboardInterrupt:
-        pass

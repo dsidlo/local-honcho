@@ -3,12 +3,10 @@
 import os
 import subprocess
 import sys
-from pathlib import Path
-from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, IntPrompt, Prompt, PromptError
+from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.status import Status
 
 from honcho_pi.config import Settings
@@ -21,7 +19,7 @@ class BootstrapError(Exception):
     pass
 
 
-def run_configuration(interactive: bool = True, settings: Optional[Settings] = None) -> Settings:
+def run_configuration(interactive: bool = True, settings: Settings | None = None) -> Settings:
     """Run the configuration wizard.
     
     Args:
@@ -212,10 +210,13 @@ def _configure_reranker_interactive(settings: Settings):
     )
     settings.reranker_enabled = enabled
     
-    if enabled and settings.embedding_provider == "ollama":
-        if Confirm.ask("Pull bge-reranker-large model?", default=True):
-            with Status("Pulling reranker model...", console=console):
-                _run_ollama_pull("qllama/bge-reranker-large:f16")
+    if (
+        enabled
+        and settings.embedding_provider == "ollama"
+        and Confirm.ask("Pull bge-reranker-large model?", default=True)
+    ):
+        with Status("Pulling reranker model...", console=console):
+            _run_ollama_pull("qllama/bge-reranker-large:f16")
 
 
 def _configure_pi_extension_interactive(settings: Settings):
@@ -265,7 +266,7 @@ def _save_configuration(settings: Settings):
     try:
         settings.save_env_file()
     except Exception as e:
-        raise BootstrapError(f"Failed to save configuration: {e}")
+        raise BootstrapError(f"Failed to save configuration: {e}") from e
 
 
 def _command_exists(cmd: str) -> bool:
@@ -318,7 +319,7 @@ def _start_docker_postgres():
         time.sleep(3)
         
     except subprocess.CalledProcessError as e:
-        raise BootstrapError(f"Failed to start Docker PostgreSQL: {e}")
+        raise BootstrapError(f"Failed to start Docker PostgreSQL: {e}") from e
 
 
 def _test_database_connection(uri: str) -> bool:
@@ -351,7 +352,7 @@ def check_prerequisites() -> list[str]:
     issues = []
     
     # Check Python version
-    if sys.version_info < (3, 10):
+    if sys.version_info < (3, 10):  # noqa: UP036 - explicit runtime version guard, not an import-time block
         issues.append(f"Python 3.10+ required, found {sys.version_info.major}.{sys.version_info.minor}")
     
     # Check essential commands

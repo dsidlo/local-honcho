@@ -139,6 +139,12 @@ exclude_lines = [
 # https://docs.basedpyright.com/latest/configuration/config-files/#sample-pyprojecttoml-file
 include = ["src", "tests", "sdks/python/src"]
 exclude = ["tests/**/disabled*.py"]
+# honcho_pi is a standalone package (packaged separately via
+# pyinstaller/pyproject.toml) that lives under src/ and imports its siblings
+# with absolute `from honcho_pi.x` imports, resolving when src/ is on the
+# import path (pytest pythonpath=["src"]). Point pyright at src so those
+# imports resolve instead of falling through to implicit-relative handling.
+extraPaths = ["src"]
 reportIgnoreCommentWithoutRule = false
 reportMissingTypeStubs = false
 reportUnusedCallResult = false

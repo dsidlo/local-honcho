@@ -7,9 +7,10 @@ starvation prevention events.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import Callable
 from enum import Enum
-from typing import Callable
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -66,7 +67,7 @@ def _initialize_metrics() -> None:
     if _wrr_metrics_initialized:
         return
 
-    metrics_namespace = settings.METRICS.NAMESPACE
+    metrics_namespace = settings.METRICS.NAMESPACE or ""
     subsystem = "wrr"
 
     # Gauges - current values that can go up and down
@@ -197,41 +198,45 @@ def record_quota_calculation(
 
     _initialize_metrics()
 
+    assert (
+        wrr_quota_gauge is not None
+        and wrr_task_allocation_gauge is not None
+        and wrr_quota_counter is not None
+        and wrr_task_query_counter is not None
+        and wrr_task_returned_counter is not None
+        and wrr_idle_fill_counter is not None
+        and wrr_starvation_prevention_counter is not None
+        and wrr_quota_diff_histogram is not None
+        and wrr_fill_efficiency_histogram is not None
+    )
+
     # Record counter
-    try:
+    with contextlib.suppress(Exception):
         wrr_quota_counter.labels(namespace=namespace).inc()
-    except Exception:
-        pass
 
     # Update gauges for each task type
     for task_type, quota in quotas.items():
-        try:
+        with contextlib.suppress(Exception):
             wrr_quota_gauge.labels(
                 namespace=namespace,
                 task_type=task_type,
             ).set(quota)
-        except Exception:
-            pass
 
         # Set actual allocation
         actual = task_type_allocation.get(task_type, 0)
-        try:
+        with contextlib.suppress(Exception):
             wrr_task_allocation_gauge.labels(
                 namespace=namespace,
                 task_type=task_type,
             ).set(actual)
-        except Exception:
-            pass
 
         # Record difference histogram
         diff = quota - actual
-        try:
+        with contextlib.suppress(Exception):
             wrr_quota_diff_histogram.labels(
                 namespace=namespace,
                 task_type=task_type,
             ).observe(diff)
-        except Exception:
-            pass
 
 
 def record_task_type_query(
@@ -259,6 +264,18 @@ def record_task_type_query(
 
     _initialize_metrics()
 
+    assert (
+        wrr_quota_gauge is not None
+        and wrr_task_allocation_gauge is not None
+        and wrr_quota_counter is not None
+        and wrr_task_query_counter is not None
+        and wrr_task_returned_counter is not None
+        and wrr_idle_fill_counter is not None
+        and wrr_starvation_prevention_counter is not None
+        and wrr_quota_diff_histogram is not None
+        and wrr_fill_efficiency_histogram is not None
+    )
+
     # Counter increments
     try:
         wrr_task_query_counter.labels(
@@ -274,13 +291,11 @@ def record_task_type_query(
 
     # Record difference between requested and returned
     diff = requested - returned
-    try:
+    with contextlib.suppress(Exception):
         wrr_quota_diff_histogram.labels(
             namespace=namespace,
             task_type=task_type,
         ).observe(diff)
-    except Exception:
-        pass
 
     # Log if significantly under-requested (potential starvation)
     if requested > 0 and returned == 0:
@@ -317,24 +332,32 @@ def record_idle_fill(
 
     _initialize_metrics()
 
+    assert (
+        wrr_quota_gauge is not None
+        and wrr_task_allocation_gauge is not None
+        and wrr_quota_counter is not None
+        and wrr_task_query_counter is not None
+        and wrr_task_returned_counter is not None
+        and wrr_idle_fill_counter is not None
+        and wrr_starvation_prevention_counter is not None
+        and wrr_quota_diff_histogram is not None
+        and wrr_fill_efficiency_histogram is not None
+    )
+
     # Counter increment
-    try:
+    with contextlib.suppress(Exception):
         wrr_idle_fill_counter.labels(
             namespace=namespace,
             strategy=strategy,
         ).inc(filled_count)
-    except Exception:
-        pass
 
     # Efficiency histogram
     if requested_count > 0:
-        try:
+        with contextlib.suppress(Exception):
             wrr_fill_efficiency_histogram.labels(
                 namespace=namespace,
                 strategy=strategy,
             ).observe(filled_count / requested_count)
-        except Exception:
-            pass
 
     # Log efficiency warnings
     if requested_count > 0 and filled_count < requested_count:
@@ -347,7 +370,7 @@ def record_idle_fill(
 def record_starvation_prevention(
     task_type: str,
     reason: str,
-    details: dict | None = None,
+    details: dict[str, object] | None = None,
 ) -> None:
     """Record starvation prevention activation.
 
@@ -369,6 +392,18 @@ def record_starvation_prevention(
         return
 
     _initialize_metrics()
+
+    assert (
+        wrr_quota_gauge is not None
+        and wrr_task_allocation_gauge is not None
+        and wrr_quota_counter is not None
+        and wrr_task_query_counter is not None
+        and wrr_task_returned_counter is not None
+        and wrr_idle_fill_counter is not None
+        and wrr_starvation_prevention_counter is not None
+        and wrr_quota_diff_histogram is not None
+        and wrr_fill_efficiency_histogram is not None
+    )
 
     # Counter increment
     try:

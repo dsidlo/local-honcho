@@ -384,9 +384,9 @@ class TestConclusionRoutes:
             f"/v3/workspaces/{test_workspace.name}/conclusions/query",
             json={
                 "query": "food preferences",
-                "observer": test_peer.name,
-                "observed": test_peer2.name,
                 "filters": {
+                    "observer": test_peer.name,
+                    "observed": test_peer2.name,
                     "session_id": test_session.name,
                 },
             },
@@ -450,8 +450,11 @@ class TestConclusionRoutes:
             json={
                 "query": "relevant topic",
                 "top_k": 2,
-                "observer": test_peer.name,
-                "observed": test_peer2.name,
+                "filters": {
+                    "observer": test_peer.name,
+                    "observed": test_peer2.name,
+                    "session_id": test_session.name,
+                },
             },
         )
 
@@ -506,9 +509,9 @@ class TestConclusionRoutes:
             json={
                 "query": "test",
                 "distance": 0.8,
-                "observer": test_peer.name,
-                "observed": test_peer2.name,
                 "filters": {
+                    "observer": test_peer.name,
+                    "observed": test_peer2.name,
                     "session_id": test_session.name,
                 },
             },

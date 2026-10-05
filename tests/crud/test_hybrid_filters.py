@@ -48,7 +48,6 @@ class TestHybridFilterValues:
     ) -> None:
         """End-to-end: search_memory with {"in": [...]} must not blow up."""
         reps = await search_memory(
-            db=db_session,
             workspace_name="filter-op-workspace",
             observer="filter-op-observer",
             observed="filter-op-observed",

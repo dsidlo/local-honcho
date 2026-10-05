@@ -1,9 +1,8 @@
 """Configuration management for Honcho Pi."""
 
 import os
-from pathlib import Path
-from typing import Optional
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 class ConfigError(Exception):
@@ -21,7 +20,7 @@ class Settings:
     log_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "state" / "honcho-pi" / "logs")
     
     # Honcho Core
-    honcho_source_dir: Optional[Path] = None
+    honcho_source_dir: Path | None = None
     honcho_install_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "lib" / "honcho-pi")
     
     # Pi Integration
@@ -29,24 +28,24 @@ class Settings:
     pi_extensions_dir: Path = field(default_factory=lambda: Path.home() / ".pi" / "agent" / "extensions")
     
     # Environment
-    env_file: Optional[Path] = None
+    env_file: Path | None = None
     
     # Service Configuration
     api_port: int = 8333
     api_host: str = "127.0.0.1"
     
     # Database
-    database_url: Optional[str] = None
+    database_url: str | None = None
     use_docker_db: bool = False
     
     # LLM Configuration
     llm_provider: str = "anthropic"  # anthropic, openai, groq, gemini
-    llm_api_key: Optional[str] = None
+    llm_api_key: str | None = None
     
     # Embedding
     embedding_provider: str = "openai"  # openai, ollama
     embedding_model: str = "text-embedding-3-small"
-    ollama_url: Optional[str] = None
+    ollama_url: str | None = None
     
     # Reranker
     reranker_enabled: bool = False
@@ -113,7 +112,7 @@ class Settings:
                 key, _, value = line.partition("=")
                 os.environ.setdefault(key, value)
     
-    def save_env_file(self, path: Optional[Path] = None):
+    def save_env_file(self, path: Path | None = None):
         """Save current settings to .env file."""
         path = path or self.env_file
         if not path:
@@ -123,7 +122,7 @@ class Settings:
         
         env_vars = [
             "# Honcho Pi Configuration",
-            f"HONCHO_PI_VERSION=1.0.0",
+            "HONCHO_PI_VERSION=1.0.0",
             f"HONCHO_BASE_URL=http://{self.api_host}:{self.api_port}",
             f"HONCHO_WORKSPACE={os.getenv('HONCHO_WORKSPACE', 'default')}",
             f"HONCHO_USER={os.getenv('USER', 'default')}",

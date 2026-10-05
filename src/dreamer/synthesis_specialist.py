@@ -5,10 +5,16 @@ Identifies high-value architectural improvements, especially state consolidation
 Runs as Phase 3 of dream cycle (after deduction and induction).
 """
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.config import settings
-from src.dreamer.specialists import BaseSpecialist
+from src.dreamer.specialists import (
+    BaseSpecialist,
+    _require_specialist_model_config,
+)
+
+if TYPE_CHECKING:
+    from src.config import ConfiguredModelSettings
 
 
 class SynthesisSpecialist(BaseSpecialist):
@@ -31,8 +37,11 @@ class SynthesisSpecialist(BaseSpecialist):
     Do NOT add temporary suggestions or implementation details.
     """
 
-    def get_model(self) -> str:
-        return getattr(settings.DREAM, "SYNTHESIS_MODEL", settings.DREAM.INDUCTION_MODEL)
+    def get_model_config(self) -> "ConfiguredModelSettings":
+        return _require_specialist_model_config(
+            settings.DREAM.INDUCTION_MODEL_CONFIG,
+            specialist_name="DREAM SYNTHESIS",
+        )
 
     def get_max_tokens(self) -> int:
         return 8192
@@ -148,6 +157,7 @@ Only create if ALL criteria met:
 
     def build_user_prompt(
         self,
+        observed: str,
         hints: list[str] | None,
         peer_card: list[str] | None = None,
     ) -> str:
@@ -168,7 +178,7 @@ Start with `get_recent_observations` to see the full context, then focus on:
 Create max 3 high-value synthesis observations."""
 
         return f"""{peer_card_context}
-Explore {self.observed}'s learned patterns and identify synthesis opportunities.
+Explore {observed}'s learned patterns and identify synthesis opportunities.
 
 Focus on:
 1. **State consolidation** - Same logic in multiple places?

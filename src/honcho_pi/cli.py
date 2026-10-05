@@ -1,16 +1,16 @@
 """Typer CLI for Honcho Pi."""
 
 import sys
-from typing import Optional
+from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from honcho_pi.bootstrap import run_configuration, check_prerequisites
+from honcho_pi.bootstrap import check_prerequisites, run_configuration
 from honcho_pi.config import Settings, settings
-from honcho_pi.pi_integration import PiIntegration, check_pi_status
+from honcho_pi.pi_integration import check_pi_status
 from honcho_pi.services import ServiceManager, get_journal_logs
 
 console = Console()
@@ -32,7 +32,7 @@ app.add_typer(self_app, name="self")
 @app.callback()
 def main_callback(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    config_dir: Optional[str] = typer.Option(None, "--config-dir", help="Config directory path"),
+    config_dir: str | None = typer.Option(None, "--config-dir", help="Config directory path"),
 ):
     """Honcho Pi - Local memory service installer and manager."""
     if verbose:
@@ -79,14 +79,14 @@ def install(
         service_mgr.enable_services()
         
         console.print("\n[bold green]✓ Installation complete![/bold green]")
-        console.print(f"\nNext steps:")
-        console.print(f"  Start services: [bold]honcho-pi start[/bold]")
-        console.print(f"  Check status:   [bold]honcho-pi status[/bold]")
-        console.print(f"  View logs:      [bold]honcho-pi self logs[/bold]")
+        console.print("\nNext steps:")
+        console.print("  Start services: [bold]honcho-pi start[/bold]")
+        console.print("  Check status:   [bold]honcho-pi status[/bold]")
+        console.print("  View logs:      [bold]honcho-pi self logs[/bold]")
         
     except Exception as e:
         console.print(f"[red]Error during installation: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 @app.command()
@@ -116,7 +116,7 @@ def start(
                 console.print(f"[green]✓ API responding at http://{settings.api_host}:{settings.api_port}[/green]")
             else:
                 console.print("[yellow]⚠ API not responding yet (may need more time)[/yellow]")
-                console.print(f"Check logs: honcho-pi self logs --service honcho-api")
+                console.print("Check logs: honcho-pi self logs --service honcho-api")
     else:
         console.print("[red]✗ Failed to start services[/red]")
         raise typer.Exit(1)
@@ -153,8 +153,7 @@ def status(
 ):
     """Show status of Honcho services and Pi extension."""
     service_mgr = ServiceManager(settings)
-    pi_integration = PiIntegration(settings)
-    
+
     # Service status
     console.print("\n[bold]Service Status[/bold]")
     svc_status = service_mgr.get_status()
@@ -224,7 +223,7 @@ def configure(
         console.print("Restart services to apply changes: honcho-pi restart")
     except Exception as e:
         console.print(f"[red]Error during configuration: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 @app.command()
@@ -240,7 +239,6 @@ def doctor(
     all_good = True
     
     # Python check
-    import sys
     py_version = sys.version_info
     if py_version >= (3, 10):
         console.print(f"[green]✓[/green] Python {py_version.major}.{py_version.minor}.{py_version.micro}")
@@ -269,7 +267,7 @@ def doctor(
     if settings.env_file and settings.env_file.exists():
         console.print(f"[green]✓[/green] Environment file: {settings.env_file}")
     else:
-        console.print(f"[yellow]⚠[/yellow] Environment file not found")
+        console.print("[yellow]⚠[/yellow] Environment file not found")
     
     # Service manager
     service_mgr = ServiceManager(settings)
@@ -286,9 +284,9 @@ def doctor(
             all_good = False
     
     if svc_status.get("api_healthy"):
-        console.print(f"[green]✓[/green] API responding to health checks")
+        console.print("[green]✓[/green] API responding to health checks")
     else:
-        console.print(f"[yellow]⚠[/yellow] API not responding")
+        console.print("[yellow]⚠[/yellow] API not responding")
     
     # Database check
     console.print("\n[bold]Database[/bold]")
@@ -301,23 +299,23 @@ def doctor(
             else:
                 console.print(f"[dim]ℹ Database: {parsed.scheme}[/dim]")
         except Exception:
-            console.print(f"[yellow]⚠[/yellow] Database URL may be invalid")
+            console.print("[yellow]⚠[/yellow] Database URL may be invalid")
     else:
-        console.print(f"[yellow]⚠[/yellow] No database configured")
+        console.print("[yellow]⚠[/yellow] No database configured")
         all_good = False
     
     # Pi check
     console.print("\n[bold]Pi Integration[/bold]")
     pi_status = check_pi_status(settings)
     if pi_status["installed"]:
-        console.print(f"[green]✓[/green] Pi installed")
+        console.print("[green]✓[/green] Pi installed")
         if pi_status["extension_present"]:
-            console.print(f"[green]✓[/green] Honcho extension present")
+            console.print("[green]✓[/green] Honcho extension present")
         else:
-            console.print(f"[yellow]⚠[/yellow] Honcho extension not installed")
+            console.print("[yellow]⚠[/yellow] Honcho extension not installed")
             all_good = False
     else:
-        console.print(f"[dim]ℹ Pi not installed (optional)[/dim]")
+        console.print("[dim]ℹ Pi not installed (optional)[/dim]")
     
     # Summary
     console.print("\n" + "─" * 40)
@@ -337,8 +335,8 @@ def self_update(
     """Check for and install updates (PyApp native)."""
     console.print("[bold]Checking for updates...[/bold]")
     
-    import urllib.request
     import json
+    import urllib.request
     
     try:
         # Check GitHub releases
@@ -403,7 +401,7 @@ def self_uninstall(
     """Uninstall Honcho Pi."""
     if not confirm:
         console.print("[bold red]This will remove:[/bold red]")
-        console.print(f"  - Services: honcho-api, honcho-deriver")
+        console.print("  - Services: honcho-api, honcho-deriver")
         console.print(f"  - Configuration: {settings.config_dir}")
         console.print(f"  - Data: {settings.data_dir}")
         console.print(f"  - Installation: {settings.honcho_install_dir}")

@@ -36,6 +36,17 @@ from src.deriver.consumer import (
     process_item,
     process_representation_batch,
 )
+from src.deriver.wrr_metrics import (
+    record_idle_fill,
+    record_quota_calculation,
+    record_task_type_query,
+    record_wrr_poll_summary,
+)
+from src.deriver.wrr_queries import (
+    calculate_wrr_quotas,
+    query_idle_fill_work_units,
+    query_task_type_work_units,
+)
 from src.dreamer.dream_scheduler import (
     DreamScheduler,
     get_dream_scheduler,
@@ -322,6 +333,20 @@ class QueueManager:
     async def get_and_claim_work_units(self) -> dict[str, str]:
         """
         Get available work units that aren't being processed.
+
+        If WRR is enabled, uses Weighted Round-Robin scheduling.
+        Otherwise, uses upstream's FIFO implementation (with token-threshold
+        batching and age-flushing for representation tasks).
+
+        Returns a dict mapping work_unit_key to aqs_id.
+        """
+        if settings.DERIVER.WRR.ENABLED:
+            return await self._get_and_claim_work_units_weighted()
+        return await self._get_and_claim_work_units_fifo()
+
+    async def _get_and_claim_work_units_fifo(self) -> dict[str, str]:
+        """
+        Get available work units that aren't being processed (FIFO order).
         For representation tasks, only returns work units whose accumulated
         tokens reach REPRESENTATION_BATCH_WORK_UNIT_TARGET_TOKENS or whose
         oldest pending item exceeds REPRESENTATION_BATCH_MAX_AGE_SECONDS,
@@ -417,6 +442,136 @@ class QueueManager:
             await db.commit()
 
             return claimed_mapping
+
+    async def _get_and_claim_work_units_weighted(self) -> dict[str, str]:
+        """
+        Get and claim work units using Weighted Round-Robin scheduling.
+
+        RACE SAFETY: This method uses an "optimistic querying" pattern with
+        atomic claim validation via claim_work_units() INSERT ... ON CONFLICT.
+        """
+        wrr_config = settings.DERIVER.WRR
+
+        # Calculate available capacity
+        limit: int = max(0, self.workers - self.get_total_owned_work_units())
+        if limit == 0:
+            return {}
+
+        async with tracked_db("get_available_work_units_weighted") as db:
+            # Calculate quotas per task type
+            quotas = calculate_wrr_quotas(
+                available_workers=limit,
+                weights=wrr_config.WEIGHTS,
+                min_slots=wrr_config.MIN_SLOTS,
+                max_slots=wrr_config.MAX_SLOTS,
+            )
+
+            if wrr_config.DEBUG_LOGGING:
+                logger.info(f"WRR Quotas: {quotas}")
+
+            # Track allocations
+            all_work_units: list[str] = []
+            task_type_allocation: dict[str, int] = {}
+
+            # Phase 1: Query each task type (excluding idle_fill)
+            for task_type, quota in quotas.items():
+                if task_type == "idle_fill" or quota <= 0:
+                    continue
+
+                work_units = await self._query_task_type(
+                    db=db,
+                    task_type=task_type,
+                    limit=quota,
+                )
+
+                all_work_units.extend(work_units)
+                task_type_allocation[task_type] = len(work_units)
+
+                # Record task type query metrics
+                record_task_type_query(task_type, quota, len(work_units))
+
+                if wrr_config.DEBUG_LOGGING:
+                    logger.info(
+                        f"WRR Queried {task_type}: "
+                        f"requested={quota}, returned={len(work_units)}"
+                    )
+
+            # Phase 2: Handle idle_fill quota explicitly
+            idle_fill_quota = quotas.get("idle_fill", 0)
+            idle_fill_filled = 0
+            if idle_fill_quota > 0:
+                # Get already-queried work units to exclude
+                claimed_work_units = set(all_work_units)
+
+                fill_units = await query_idle_fill_work_units(
+                    db=db,
+                    limit=idle_fill_quota,
+                    exclude_work_units=claimed_work_units,
+                    strategy=wrr_config.IDLE_FILL_STRATEGY,
+                )
+                all_work_units.extend(fill_units)
+                idle_fill_filled = len(fill_units)
+                task_type_allocation["idle_fill"] = idle_fill_filled
+
+                # Record idle fill metrics
+                record_idle_fill(
+                    idle_fill_filled, idle_fill_quota, wrr_config.IDLE_FILL_STRATEGY
+                )
+
+                if wrr_config.DEBUG_LOGGING:
+                    logger.info(
+                        f"WRR Idle fill: {len(fill_units)}/{idle_fill_quota} units"
+                    )
+
+            # Record summary metrics
+            record_wrr_poll_summary(
+                quotas=quotas,
+                allocations=task_type_allocation,
+                idle_fill_requested=idle_fill_quota,
+                idle_fill_filled=idle_fill_filled,
+                strategy=wrr_config.IDLE_FILL_STRATEGY,
+            )
+
+            # Claim work units
+            if not all_work_units:
+                await db.commit()
+                return {}
+
+            # claim_work_units() performs atomic INSERT ... ON CONFLICT.
+            # If another worker claimed a work unit between query and claim,
+            # it will be excluded from results. This is expected behavior.
+            claimed_mapping = await self.claim_work_units(db, all_work_units)
+            await db.commit()
+
+            return claimed_mapping
+
+    def _record_wrr_metrics(
+        self,
+        allocation: dict[str, int],
+        total_requested: int,
+    ) -> None:
+        """
+        Record WRR allocation metrics.
+
+        DEPRECATED: Use wrr_metrics module directly instead.
+        Kept for backward compatibility.
+        """
+        quotas = {k: v for k, v in allocation.items()}
+        record_quota_calculation(quotas, allocation)
+
+    async def _query_task_type(
+        self,
+        db: AsyncSession,
+        task_type: str,
+        limit: int,
+    ) -> list[str]:
+        """
+        Query available work units for a specific task type.
+
+        This is a simple wrapper around the wrr_queries module functions
+        that handles task type dispatching.
+        """
+        return await query_task_type_work_units(db, task_type, limit)
 
     async def claim_work_units(
         self, db: AsyncSession, work_unit_keys: Sequence[str]

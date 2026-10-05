@@ -897,3 +897,9 @@ SPECIALISTS: dict[str, BaseSpecialist] = {
     "deduction": DeductionSpecialist(),
     "induction": InductionSpecialist(),
 }
+
+# Imported after SPECIALISTS is defined: synthesis_specialist imports
+# BaseSpecialist from this module, so a top-level import would be circular.
+from src.dreamer.synthesis_specialist import SynthesisSpecialist  # noqa: E402
+
+SPECIALISTS["synthesis"] = SynthesisSpecialist()

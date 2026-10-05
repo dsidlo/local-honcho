@@ -8,7 +8,7 @@ from scratch).
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from src.config import settings
 
@@ -51,11 +51,15 @@ class WorkUnitErrorTracker:
         max_backoff: float | None = None,
         ttl: float | None = None,
     ):
-        cfg = settings.DERIVER.RETRY
-        self._max_retries: int = max_retries if max_retries is not None else cfg.MAX_RETRIES
-        self._base_backoff: float = base_backoff if base_backoff is not None else cfg.BASE_BACKOFF_SEC
-        self._max_backoff: float = max_backoff if max_backoff is not None else cfg.MAX_BACKOFF_SEC
-        self._ttl: float = ttl if ttl is not None else cfg.ERROR_TRACKER_TTL_SEC
+        # Default to the retry knobs on pi-dev's error tracker. Upstream moved
+        # retry bookkeeping onto the queue item itself, so DERIVER.RETRY no
+        # longer exists in settings; the tracker here now only serves the
+        # standalone test suite and any opt-in re-use.
+        retry_cfg = getattr(settings.DERIVER, "RETRY", None)
+        self._max_retries: int = max_retries if max_retries is not None else getattr(retry_cfg, "MAX_RETRIES", 3)
+        self._base_backoff: float = base_backoff if base_backoff is not None else getattr(retry_cfg, "BASE_BACKOFF_SEC", 5.0)
+        self._max_backoff: float = max_backoff if max_backoff is not None else getattr(retry_cfg, "MAX_BACKOFF_SEC", 300.0)
+        self._ttl: float = ttl if ttl is not None else getattr(retry_cfg, "ERROR_TRACKER_TTL_SEC", 3600.0)
 
         self._records: dict[str, ErrorRecord] = {}
         self._lock = threading.Lock()
@@ -79,7 +83,7 @@ class WorkUnitErrorTracker:
         ``now`` instead of a future timestamp; otherwise the record would stay
         backed off forever and the permanent-failure branch could never run.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self._lock:
             existing = self._records.get(work_unit_key)
             if existing is None:
@@ -111,7 +115,7 @@ class WorkUnitErrorTracker:
             record = self._records.get(work_unit_key)
             if record is None:
                 return False
-            return datetime.now(timezone.utc) < record.backoff_until
+            return datetime.now(UTC) < record.backoff_until
 
     def is_exhausted(self, work_unit_key: str) -> bool:
         """True if retry_count >= max_retries (permanent failure)."""
@@ -142,14 +146,14 @@ class WorkUnitErrorTracker:
             record = self._records.get(work_unit_key)
             if record is None:
                 return False
-            return record.escalate and datetime.now(timezone.utc) >= record.backoff_until
+            return record.escalate and datetime.now(UTC) >= record.backoff_until
 
     def cleanup_expired(self) -> int:
         """Remove records older than TTL to prevent unbounded growth.
 
         Returns the number of records removed.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=self._ttl)
         with self._lock:
             expired_keys = [

@@ -23,7 +23,7 @@ from migrations.utils import column_exists, get_schema, index_exists
 
 # revision identifiers, used by Alembic.
 revision: str = "adb68784e753"
-down_revision: str | None = "f1a2b3c4d5e6"
+down_revision: str | None = "b8d2f4a6c9e1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

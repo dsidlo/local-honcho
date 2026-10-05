@@ -12,6 +12,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
+from sqlalchemy.sql.elements import BooleanClauseList, ColumnElement
 from sqlalchemy.sql.functions import func
 
 from src import models, schemas
@@ -1709,7 +1710,7 @@ async def query_documents_hybrid(
         if where_clause is not None:
             conditions = (
                 where_clause.clauses
-                if isinstance(where_clause, sa.sql.elements.BooleanClauseList)
+                if isinstance(where_clause, BooleanClauseList)
                 else [where_clause]
             )
             base_filters.extend(conditions)
@@ -1747,7 +1748,7 @@ async def _hybrid_rrf(
     db: AsyncSession,
     query: str,
     embedding: list[float],
-    base_filters: list,
+    base_filters: list[ColumnElement[bool]],
     max_distance: float | None,
     top_k: int,
     rrf_k: int = 60,
@@ -1844,7 +1845,7 @@ async def _hybrid_weighted(
     db: AsyncSession,
     query: str,
     embedding: list[float],
-    base_filters: list,
+    base_filters: list[ColumnElement[bool]],
     max_distance: float | None,
     top_k: int,
     weights: dict[str, float] | None = None,
@@ -1958,7 +1959,7 @@ async def _hybrid_cascade(
     db: AsyncSession,
     query: str,
     embedding: list[float],
-    base_filters: list,
+    base_filters: list[ColumnElement[bool]],
     max_distance: float | None,
     top_k: int,
 ) -> Sequence[models.Document]:

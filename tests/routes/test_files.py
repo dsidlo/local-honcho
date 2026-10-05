@@ -141,7 +141,7 @@ async def test_create_messages_with_empty_json_file(
     db_session: AsyncSession,
     sample_data: tuple[Workspace, Peer],
 ):
-    """Test that empty JSON uploads do not crash and create no messages."""
+    """Test that empty JSON uploads do not crash and create empty content."""
     test_workspace, test_peer = sample_data
 
     test_session = await _create_test_session(db_session, test_workspace)
@@ -156,7 +156,10 @@ async def test_create_messages_with_empty_json_file(
 
     assert response.status_code == 201
     data = response.json()
-    assert len(data) == 0  # Empty content is filtered out as a blank message
+    assert len(data) == 1
+    assert data[0]["content"] == ""
+    assert data[0]["peer_id"] == test_peer.name
+    assert data[0]["session_id"] == session_name
 
 
 @pytest.mark.asyncio
@@ -233,8 +236,9 @@ async def test_create_messages_with_empty_file(
 
     assert response.status_code == 201
     data = response.json()
-    # Empty content is filtered out as a blank message
-    assert len(data) == 0
+    # Upstream contract: an empty file produces a single empty-content message
+    assert len(data) == 1
+    assert data[0]["content"] == ""
 
 
 @pytest.mark.asyncio

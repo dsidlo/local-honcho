@@ -5,7 +5,7 @@ including per-task-type querying, idle fill capabilities, and quota calculation.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -242,7 +242,7 @@ async def _query_representation_work_units(
         List of work_unit_keys for representation tasks
     """
     representation_prefix = "representation:"
-    batch_max_tokens = settings.DERIVER.REPRESENTATION_BATCH_MAX_TOKENS
+    batch_max_tokens = settings.DERIVER.REPRESENTATION_BATCH_WORK_UNIT_TARGET_TOKENS
 
     # Token statistics subquery
     token_stats_subq = (
@@ -290,7 +290,7 @@ async def _query_representation_work_units(
     # Anti-starvation fallback: if no results and tasks are ancient (> 1 hour old)
     if not rows and not settings.DERIVER.FLUSH_ENABLED and batch_max_tokens > 0:
         # Calculate anti-starvation threshold (1 hour ago)
-        anti_starvation_cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        anti_starvation_cutoff = datetime.now(UTC) - timedelta(hours=1)
 
         fallback_query = (
             select(token_stats_subq.c.work_unit_key)
@@ -381,7 +381,7 @@ async def query_idle_fill_work_units(
     # Apply token threshold for representation tasks
     # This is done by excluding representation work units that don't meet threshold
     if not settings.DERIVER.FLUSH_ENABLED:
-        batch_max_tokens = settings.DERIVER.REPRESENTATION_BATCH_MAX_TOKENS
+        batch_max_tokens = settings.DERIVER.REPRESENTATION_BATCH_WORK_UNIT_TARGET_TOKENS
 
         # Build representation token subquery
         rep_token_subq = (
@@ -405,7 +405,7 @@ async def query_idle_fill_work_units(
         )
 
         # Exclude representation tasks below threshold unless they're old
-        anti_starvation_cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        anti_starvation_cutoff = datetime.now(UTC) - timedelta(hours=1)
 
         # Get old representation tasks (allowed for anti-starvation)
         old_rep_subq = (
