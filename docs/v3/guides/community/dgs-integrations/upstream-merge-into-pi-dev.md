@@ -4,6 +4,17 @@ sessionId: session-261003-172615-xbrm
 
 # Requirements
 
+### Execution status (2026-10-05)
+
+**All six steps complete on branch `pi-dev-merge-upstream`** (merge commit
+`8155e20b`, repairs commit `2902a153`). Waiting on user approval to
+fast-forward `pi-dev` (Step 6 gate), per the plan below. Real outcome differs
+from prediction in three places, recorded in the Step 6 summary at the bottom
+of this document.
+
+---
+
+
 ### Overview & Goals
 
 Merge all upstream changes currently represented by `../honcho-latest` branch `main` (commit `06ed1929`) into `../honcho` branch `pi-dev`, **without making any change whatsoever to `../honcho-latest`**.
@@ -206,3 +217,78 @@ The report reflects what actually happened and `pi-dev` advances only on explici
 - Record the post-merge follow-ups that are deliberately deferred: re-embedding the existing padded 1536-dim vector rows under the now-configurable dimension, and the `src/db.py` module-scope `engine` singleton shared across concurrent requests.
 - Present `pi-dev-merge-upstream` for review; do not fast-forward `pi-dev` or push to `origin/pi-dev` without explicit approval.
 - Leave `recovered-trial-merge` and the trial tags in place as the audit trail.
+
+## Execution outcome (2026-10-05)
+
+### What actually happened
+
+The session that executed the plan died twice (step-limit cut at 17:55, then
+"Insufficient account balance" in the middle of Gate B's first `ruff check`).
+It left behind: the merge commit `8155e20b` with all 29 conflicts resolved, the
+five semantic repairs in the index but **not committed**, and the Alembic
+re-parent + `DeriverWRRSettings` registration as an uncommitted working-tree
+edit. The resumption run verified those, finished the lint/type gates, and ran
+all three validation gates:
+
+| Gate | Result |
+|---|---|
+| A (honcho-latest untouched) | `06ed1929` clean `status --porcelain` before and after |
+| B (structural) | `alembic heads` = 1 head (`adb68784e753`); up → downgrade `b8d2f4a6c9e1` → up clean against disposable `pgvector/pgvector:pg18`; `content_tsv`, tsv/trgm/`idx_documents_fts_filtered` GIN, HNSW index all present; `ruff check src/` 0 errors; `basedpyright` net improvement vs pi-dev baseline: 215 → 74 src errors (remaining set is the pre-existing wrr/reranker/honcho_pi strictness, plus optional-dep import resolution for lancedb/qdrant extras) |
+| C (behavioral) | 63 routes incl. `/v3/workspaces/{id}/documents/search`; hybrid search suite 10/10; full pytest **2976 passed, 0 failed** (started at 18 failed); TS SDK via pytest/bun passed |
+
+### Deviations from the predicted resolution matrix
+
+1. **Sixth repair, not planned:** the merge silently dropped pi-dev's WRR queue
+   scheduler (`get_and_claim_work_units` lost its WEIGHTED/FIFO dispatch, and
+   `DeriverWRRSettings` vanished from config even though `wrr_metrics.py` /
+   `wrr_queries.py` survived as orphans). The trial merge had not caught it
+   because the trial's test run paired one parent's tests with the other's
+   `src`. Restored the dispatch + settings block, with `wrr_queries` retargeted
+   to upstream's renamed threshold setting
+   `REPRESENTATION_BATCH_WORK_UNIT_TARGET_TOKENS` (claimability semantics:
+   512 target + age-flush, vs pi-dev's hard 1024 wall).
+2. **Reranker settings shape:** the conflict resolution took upstream's
+   4-field `RerankerSettings` (BASE_URL/TIMEOUT/CANDIDATE_LIMIT) over pi-dev's
+   7-field client-specific block, which broke `reranker_client.py` and the
+   type gate. Both shapes now coexist on one settings class.
+3. **Upstream adopted, superseding pi-dev WIP:** pi-dev's in-progress
+   `error_tracker` retry escalation was already replaced upstream by
+   attempt-counts-on-payload (`MAX_RETRYABLE_ATTEMPTS`, strictly better). The
+   `error_tracker` module is orphaned (only its test suite uses it) and now
+   reads `DERIVER.RETRY` defensively, defaulting to the old constants.
+
+### Genuine test fixes (not trial artifacts)
+
+- `tests/conftest.py`: `pg_trgm` extension now created for hybrid-search
+  `similarity()`; new autouse `pin_fifo_queue_scheduling` fixture neutralizes
+  developer `.env` pins (`DERIVER__WRR__ENABLED`,
+  `DERIVER__FLUSH_ENABLED`) that `load_dotenv(override=True)` applies over
+  the CLI environment — the same leak would have broken queue tests on any
+  dev machine.
+- Conclusion-query and empty-file-upload tests updated to upstream's API
+  contracts (observer/observed via `filters`; empty upload → one
+  empty-content message).
+- `search_memory()` signature changed by upstream (db-free design); the
+  operator-filter test updated accordingly.
+- Scope route policy: the fork's `documents/search` route now has classified
+  ALLOW read-only cases for both `observer` and `observed` positions
+  (`test_every_peer_position_is_classified` was failing for them).
+
+### Deferred follow-ups (unchanged from plan)
+
+- Re-embed existing padded 1536-dim vector rows under the now-configurable
+  dimension.
+- `src/db.py` module-scope `engine` singleton.
+- `basedpyright` strictness debt in `wrr_metrics`/`reranker_client`/
+  `honcho_pi` (pre-existing at pi-dev tip, not merge-introduced).
+- The developer `.env` currently pins `DERIVER__WRR__ENABLED=true` and
+  `DERIVER__FLUSH_ENABLED=true`; production `pi-dev` behavior now depends on
+  those env vars just like local, so the deployment config should be reviewed
+  when `pi-dev` advances.
+
+### Handoff
+
+`pi-dev-merge-upstream` (`2902a153`) is fast-forward-ready for `pi-dev`
+(pending user approval). `recovered-trial-merge` (`8d3bc5fc`) and the five
+trial tags remain anchored as the audit trail. `../honcho-latest` untouched
+throughout.
