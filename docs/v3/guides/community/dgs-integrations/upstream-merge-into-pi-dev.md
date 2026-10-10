@@ -292,3 +292,71 @@ all three validation gates:
 (pending user approval). `recovered-trial-merge` (`8d3bc5fc`) and the five
 trial tags remain anchored as the audit trail. `../honcho-latest` untouched
 throughout.
+
+## Handoff completion (2026-10-10)
+
+The user approved advancing `pi-dev`; the remaining plan steps were executed
+and the outcome recorded below.
+
+### What was done
+
+- **Gate A re-check (pre-FF):** `../honcho-latest` HEAD unchanged at
+  `06ed1929`, `status --porcelain` empty. `recovered-trial-merge` and the
+  five `trial/*` tags still anchored.
+- **Fast-forward executed with user approval:** `pi-dev` moved
+  `90f9cbd2 → a0295a06` (`git merge --ff-only pi-dev-merge-upstream`). Both
+  branch labels now point at the same commit; `pi-dev-merge-upstream` is
+  retained as a redundant pointer. `pi-dev` is 320 commits ahead of
+  `origin/pi-dev` (11 pre-merge + merge work). Not pushed; push remains a
+  separate explicit decision.
+- **Post-FF structural re-check (on `pi-dev` tip):** `import src.main` OK,
+  63 routes, hybrid-search route present
+  (`/v3/workspaces/{workspace_id}/documents/search`), `alembic heads` =
+  single head `adb68784e753`, `ruff check src/` all checks passed.
+- **Gate B re-run post-FF** on a fresh disposable `pgvector/pgvector:pg18`
+  container (trust auth, Docker volume `honcho-merge-verify-data`, host port
+  5434): `upgrade head → downgrade b8d2f4a6c9e1 → upgrade head` all clean;
+  `idx_documents_content_tsv`, `idx_documents_content_trgm`,
+  `idx_documents_fts_filtered`, generated `content_tsv`, and both HNSW
+  indexes verified present after the roundtrip.
+- **Gate C subset re-run post-FF** against the same disposable DB:
+  `tests/routes` + `tests/integration/test_enqueue.py` +
+  `tests/crud/test_document.py` + `tests/telemetry/test_emitter.py` →
+  **596 passed, 0 failed**. (Full-suite 2976-pass run was already done on
+  the identical tree at `2902a153`; the branch move changed nothing in the
+  tree, so this subset re-check is the post-FF confirmation.)
+
+### Dev-environment notes discovered during re-check
+
+- pg18 image layout: `/pgvector/pgvector:pg18` stores data under
+  `PGDATA=/var/lib/postgresql/18/docker`; a Docker volume must be mounted at
+  `/var/lib/postgresql` (not `/var/lib/postgresql/data`, which pg18 rejects
+  for pg_upgrade mount-boundary reasons).
+- Test DB resolution on the merged tree: `tests/conftest.py` derives the
+  test DB from `settings.DB.CONNECTION_URI` (`DB_` env prefix, i.e.
+  `DB_CONNECTION_URI=...`), falling back to the localhost:5432 default. The
+  `HONCHO_TEST_DB_URI` override lives only in `tests/conftest_v2.py`, which
+  is an unreferenced alternate (mock-free) fixture file. Running suites with
+  env-pinned WRR/flush overrides comes from the developer `.env`
+  (`load_dotenv(override=True)`); the `pin_fifo_queue_scheduling` fixture in
+  conftest neutralizes those pins for queue tests.
+- The disposable-container Gate B/C runs above used
+  `DB_CONNECTION_URI=postgresql+psycopg://postgres@127.0.0.1:5434/postgres`
+  plus `DB_SCHEMA=public`.
+- `tests/vector_store/*` (Qdrant/LanceDB/Turbopuffer suite) errors during
+  collection when those optional extras are not installed; ignore
+  (`--ignore tests/vector_store`) unless testing a specific vector store.
+
+### Remaining deferred follow-ups (unchanged)
+
+- Push decision for `origin/pi-dev` (320 commits) — explicit, not done here.
+- Review the developer `.env` WRR/flush pins when production config is
+  advanced.
+- Re-embed existing padded 1536-dim vector rows; `src/db.py` engine
+  singleton; basedpyright strictness debt (pre-existing).
+
+### Trial cleanup
+
+`recovered-trial-merge` and the five `trial/*` tags are intentionally kept
+as the audit trail per plan (no `gc`); they can be pruned after the push
+decision is settled.
