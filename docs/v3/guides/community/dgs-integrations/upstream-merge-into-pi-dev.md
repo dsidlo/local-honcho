@@ -385,27 +385,45 @@ and the outcome recorded below.
   1. *DB URI key (as above).* `HONCHO_DB_CONNECTION_URI` alias dropped;
      merged `DBSettings` hardcodes the localhost:5432/postgres default and
      honors only `DB_CONNECTION_URI`.
-  2. **Flat model-selection keys are silently INERT post-merge.** The
-     pre-merge deployed code (WorkingDirectory `~/.local/lib/honcho`, zero
-     `MODEL_CONFIG` refs in its shipped config.py) reads
+  2. **Flat model-(SELECTION) keys are silently INERT post-merge; flat
+     scalar keys whose names remain real fields are NOT.** The
+     pre-merge deployed code (WorkingDirectory `~/.local/lib/honcho`,
+     zero `MODEL_CONFIG` refs in its shipped config.py) reads
      `DERIVER_PROVIDER`/`DERIVER_MODEL`/`DERIVER_BACKUP_*`,
      `SUMMARY_PROVIDER`/`SUMMARY_MODEL`/`SUMMARY_*`, and
-     `DREAM_PROVIDER`/`DREAM_MODEL`/`DREAM_*` flat keys directly. Upstream's
-     merged schema models these as nested `MODEL_CONFIG`
-     (`ConfiguredModelSettings`) under `DERIVER__MODEL_CONFIG__*`,
-     `SUMMARY__MODEL_CONFIG__*`, `DREAM__*_MODEL_CONFIG__*` and sets
-     `extra="ignore"` — so all ~25 deployed flat model-family keys are
-     accepted but **bind to nothing**. Verified empirically: with the flat
-     keys set via CLI env, merged settings resolves
-     `DERIVER.MODEL_CONFIG.PROVIDER/MODEL/BACKUP_*` to `None` and boots
-     fine on upstream defaults. Upstream's own
+     `DREAM_PROVIDER`/`DREAM_MODEL`/`DREAM_*` flat keys directly.
+     Upstream's merged schema models model SELECTION as nested
+     `MODEL_CONFIG` (`ConfiguredModelSettings`), so the ~15
+     model-selection flat keys (providers/models/thinking/token knobs
+     that no longer exist as fields) are accepted under
+     `extra="ignore"` but **bind to nothing**. HOWEVER, the scalar flat
+     keys whose field names survived the merge
+     (`DERIVER_DEDUPLICATE`, `DERIVER_WORKERS`,
+     `DREAM_MAX_TOOL_ITERATIONS`, `DREAM_DOCUMENT_THRESHOLD`,
+     `DREAM_IDLE_TIMEOUT_MINUTES`, `DREAM_MIN_HOURS_BETWEEN_DREAMS`,
+     `SUMMARY_MESSAGES_PER_*_SUMMARY`, ...) are exactly canonical
+     `SECTION_PREFIX + FIELD` names and DO bind flat with no renaming
+     (probe-confirmed: `DREAM_MAX_TOOL_ITERATIONS` and
+     `DREAM_DOCUMENT_THRESHOLD` bound and resolved). Verified
+     empirically: with the flat model-selection keys set via CLI env,
+     merged settings resolves `DERIVER.MODEL_CONFIG.MODEL/BACKUP_*` to
+     `None` and boots fine on upstream defaults, and upstream's own
      `tests/llm/test_model_config.py` pins the deprecation
-     (`DEIVER/SUMMARY/DREAM_PROVIDER` asserted ABSENT from the merged
+     (`DERIVER/SUMMARY/DREAM_PROVIDER` asserted ABSENT from the merged
      template; `DERIVER_MODEL_CONFIG__MODEL` present).
-  **Pre-deploy checklist (VALIDATED end to end 2026-10-10):** (a) replace
-  `HONCHO_DB_CONNECTION_URI` with `DB_CONNECTION_URI` in the deployed env
-  file, (b) translate flat model-family keys to their `__`-nested
-  `MODEL_CONFIG` equivalents per the matrix below, (c) verify with
+  **Pre-deploy checklist (VALIDATED end to end 2026-10-10; spelling
+  corrected to match upstream template after a template/test cross-check
+  plus binding probes):** (a) replace `HONCHO_DB_CONNECTION_URI` with
+  `DB_CONNECTION_URI` in the deployed env file, (b) translate flat
+  model-family keys to the nested `MODEL_CONFIG` spelling used by
+  upstream's `.env.template`: **one underscore at the section junction,
+  `__` inside the model-config subtree** (`DERIVER_MODEL_CONFIG__MODEL`,
+  `SUMMARY_MODEL_CONFIG__FALLBACK__MODEL`,
+  `DREAM_DEDUCTION_MODEL_CONFIG__MODEL`, ...). The fully-doubled variant
+  (`DERIVER__MODEL_CONFIG__MODEL`) ALSO binds (verified in isolated
+  probes; when both are set the doubled variant wins), but upstream's
+  template, docs, and the deprecation pin test all use the template
+  spelling, so prefer it. (c) verify with
   `uv run python -c "from src.config import settings; ..."` that
   `DERIVER/SUMMARY/DREAM` sub-configs and `DB.CONNECTION_URI` resolve to
   the intended values, (d) only then rebuild the deployment from the
@@ -413,32 +431,67 @@ and the outcome recorded below.
   plus a flat-key translator, but the upstream-canonical rename is the
   lower-risk path.)
 
-  **Translation matrix (each entry verified resolving on the merged
-  tree with demo values):**
+  **Translation matrix (spelling = upstream template form; the
+  model-config rows were re-proven resolving end to end under the
+  template spelling; scalar rows are existing real fields that bind by
+  name):**
 
-  | Flat key (deployed) | Canonical merged key (all `__`-nested) |
+  | Flat key (deployed) | Canonical merged key (nested below section prefix) |
   |---|---|
-  | `DERIVER_PROVIDER` + `DERIVER_MODEL` | `DERIVER__MODEL_CONFIG__MODEL` — transport from `provider` via the `provider/model` shorthand (`openai/...`, `anthropic/...`, `gemini/...`; non-shorthand implies openai transport) |
-  | `DERIVER_MAX_OUTPUT_TOKENS` | `DERIVER__MODEL_CONFIG__MAX_OUTPUT_TOKENS` |
-  | `DERIVER_THINKING_BUDGET_TOKENS` | `DERIVER__MODEL_CONFIG__THINKING_BUDGET_TOKENS` |
-  | `DERIVER_BACKUP_PROVIDER` + `DERIVER_BACKUP_MODEL` | `DERIVER__MODEL_CONFIG__FALLBACK__MODEL` (independent fallback config, `FallbackModelSettings`) |
-  | `DERIVER_DEDUPLICATE` | `DERIVER__DEDUPLICATE` | 
-  | `SUMMARY_PROVIDER` + `SUMMARY_MODEL` | `SUMMARY__MODEL_CONFIG__MODEL` |
-  | `SUMMARY_THINKING_BUDGET_TOKENS` | `SUMMARY__MODEL_CONFIG__THINKING_BUDGET_TOKENS` |
-  | `SUMMARY_BACKUP_PROVIDER` + `SUMMARY_BACKUP_MODEL` | `SUMMARY__MODEL_CONFIG__FALLBACK__MODEL` |
-  | `DREAM_DEDUCTION_MODEL` | `DREAM__DEDUCTION_MODEL_CONFIG__MODEL` |
-  | `DREAM_INDUCTION_MODEL` | `DREAM__INDUCTION_MODEL_CONFIG__MODEL` |
-  | `DREAM_SYNTHESIS_MODEL` | `DREAM__INDUCTION_MODEL_CONFIG__*` — merged `SynthesisSpecialist.get_model_config()` deliberately reuses `DREAM.INDUCTION_MODEL_CONFIG` (quality-over-quantity defaults) |
-  | `DREAM_MAX_TOOL_ITERATIONS` | `DREAM__MAX_TOOL_ITERATIONS` |
-  | `DREAM_DOCUMENT_THRESHOLD` | `DREAM__DOCUMENT_THRESHOLD` |
-  | `DREAM_IDLE_TIMEOUT_MINUTES` | `DREAM__IDLE_TIMEOUT_MINUTES` |
-  | `DREAM_MIN_HOURS_BETWEEN_DREAMS` | `DREAM__MIN_HOURS_BETWEEN_DREAMS` |
+  | `DERIVER_PROVIDER` + `DERIVER_MODEL` | `DERIVER_MODEL_CONFIG__MODEL` — transport from `provider` via the `provider/model` shorthand (`openai/...`, `anthropic/...`, `gemini/...`); non-shorthand implies openai transport |
+  | `DERIVER_MAX_OUTPUT_TOKENS` | `DERIVER_MODEL_CONFIG__MAX_OUTPUT_TOKENS` |
+  | `DERIVER_THINKING_BUDGET_TOKENS` | `DERIVER_MODEL_CONFIG__THINKING_BUDGET_TOKENS` |
+  | `DERIVER_BACKUP_PROVIDER` + `DERIVER_BACKUP_MODEL` | `DERIVER_MODEL_CONFIG__FALLBACK__MODEL` (independent fallback config, `FallbackModelSettings`) |
+  | `DERIVER_DEDUPLICATE` | `DERIVER_DEDUPLICATE` | 
+  | `SUMMARY_PROVIDER` + `SUMMARY_MODEL` | `SUMMARY_MODEL_CONFIG__MODEL` |
+  | `SUMMARY_THINKING_BUDGET_TOKENS` | `SUMMARY_MODEL_CONFIG__THINKING_BUDGET_TOKENS` |
+  | `SUMMARY_BACKUP_PROVIDER` + `SUMMARY_BACKUP_MODEL` | `SUMMARY_MODEL_CONFIG__FALLBACK__MODEL` |
+  | `DREAM_DEDUCTION_MODEL` | `DREAM_DEDUCTION_MODEL_CONFIG__MODEL` |
+  | `DREAM_INDUCTION_MODEL` | `DREAM_INDUCTION_MODEL_CONFIG__MODEL` |
+  | `DREAM_SYNTHESIS_MODEL` | `DREAM_INDUCTION_MODEL_CONFIG__*` — merged `SynthesisSpecialist.get_model_config()` deliberately reuses `DREAM.INDUCTION_MODEL_CONFIG` (quality-over-quantity defaults) |
+  | `DREAM_MAX_TOOL_ITERATIONS` | `DREAM_MAX_TOOL_ITERATIONS` |
+  | `DREAM_DOCUMENT_THRESHOLD` | `DREAM_DOCUMENT_THRESHOLD` |
+  | `DREAM_IDLE_TIMEOUT_MINUTES` | `DREAM_IDLE_TIMEOUT_MINUTES` |
+  | `DREAM_MIN_HOURS_BETWEEN_DREAMS` | `DREAM_MIN_HOURS_BETWEEN_DREAMS` |
   | `DREAM_PROVIDER` / `DREAM_MODEL` | no merged equivalent — merged `DreamSettings` has no top-level model config; the dream agents resolve each specialist from `DEDUCTION`/`INDUCTION_MODEL_CONFIG` independently (upstream's own defaults: `openai/gpt-5.4-mini`) |
   | `DREAM_BACKUP_PROVIDER` / `DREAM_BACKUP_MODEL` | no merged equivalent — `DreamSettings` dropped the `BackupLLMSettingsMixin` and fallback support wholesale |
-  | `DREAM_MAX_OUTPUT_TOKENS` / `DREAM_THINKING_BUDGET_TOKENS` | no single equivalent — set per sub-config: `DREAM__DEDUCTION_MODEL_CONFIG__MAX_OUTPUT_TOKENS` / `DREAM__INDUCTION_MODEL_CONFIG__MAX_OUTPUT_TOKENS` (and `__THINKING_BUDGET_TOKENS`) |
+  | `DREAM_MAX_OUTPUT_TOKENS` / `DREAM_THINKING_BUDGET_TOKENS` | no single equivalent — set per sub-config: `DREAM_DEDUCTION_MODEL_CONFIG__MAX_OUTPUT_TOKENS` / `DREAM_INDUCTION_MODEL_CONFIG__MAX_OUTPUT_TOKENS` (and `__THINKING_BUDGET_TOKENS`) |
 
-  Also unchanged and non-blocking: `LOG_LEVEL` and `ALLOWED_IP_NETWORKS`
-  are top-level (no prefix) and bind on the merged tree as-is; API keys
+  Scalar fields directly under a section have exactly one canonical name:
+  `SECTION_PREFIX + FIELD` (e.g. `DERIVER_DEDUPLICATE`,
+  `DERIVER_WORKERS`, `DREAM_MAX_TOOL_ITERATIONS`,
+  `DREAM_DOCUMENT_THRESHOLD`). The doubly-underscored spelling for a
+  scalar also resolves via pydantic's nested-delimiter mapping
+  (`DERIVER__DEDUPLICATE` bound `DEDUPLICATE` in a probe) but is
+  non-canonical;
+
+- **env-file discovery precedence pitfall (discovered while re-running
+  the resolution probes, then corrected after a binding-context probe):**
+  `src/config.py` calls `load_dotenv(override=True)` at import. A
+  `load_dotenv()` with no path binds ONE file: python-dotenv walks UP the
+  tree from the importing call site's directory, stopping at the first
+  `.env` found. From the normal repo import chain that is the repo
+  `.env` (verified: `DERIVER__WORKERS` present in `os.environ` after
+  `import src.config`; flat `DERIVER_WORKERS` absent — only the file it
+  binds is applied). Consequences observed on this box:
+  - If the repo `.env` is missing/renamed, walk-up continues and binds
+    `$HOME/.env` instead (69 keys there, including its own DREAM/DERIVER
+    model pins) - so a bare checkout here silently inherits home pins.
+  - `override=True` means discovered-dotenv keys are written into
+    `os.environ`, beating any explicit process env the invoker set for
+    the same key names.
+  - When a key exists in BOTH files, only the repository-level `.env`
+    applies (binding stops at the first hit), so cross-file precedence
+    between repo and HOME is determined by presence/absence, not by
+    "HOME always wins".
+  This machine has BOTH a repo `.env` and a `$HOME/.env` carrying
+  overlapping DERIVER/DREAM/LLM keys (deriver model pins differ between
+  them); resolution tests here must account for which file will be bound
+  first from the process's import context.
+
+  Also unchanged and non-blocking: `LOG_LEVEL` is top-level and binds as-is;
+  `ALLOWED_IP_NETWORKS` is top-level (not in `.env.template` but declared
+  in `AppSettings` with `env_prefix=""`) and binds; API keys
   (`OPENAI_API_KEY`, `OLLAMA_API_KEY`, `Gemini`/`Vertex`/`HF`/`Brave`/
   `Exa`...) are consumed by third-party SDKs directly from the process env
   (not modeled by settings) - unaffected by the merge.
