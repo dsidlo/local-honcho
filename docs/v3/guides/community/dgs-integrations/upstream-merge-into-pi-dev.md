@@ -340,20 +340,34 @@ and the outcome recorded below.
   env-pinned WRR/flush overrides comes from the developer `.env`
   (`load_dotenv(override=True)`); the `pin_fifo_queue_scheduling` fixture in
   conftest neutralizes those pins for queue tests.
-- **Machine-env sensitivity (root-caused 2026-10-10):** plain
-  `uv run pytest` without a `DB_CONNECTION_URI` export fails on this
-  workstation (62 collection/setup errors: password auth on the default
-  localhost:5432/postgres). The developer `.env` carries no DB URI key — its
-  `HONCHO_DB_CONNECTION_URI` is consumed only by `migrations/env.py`; the
-  app/settings layer upstream-merged to the `DB_` prefix. Identical behavior
-  pre- and post-fast-forward (full suite passed at `2902a153` with the
-  disposable-DB exports), so this is machine-env shape, not a merge defect.
-  Use `DB_CONNECTION_URI=... DB_SCHEMA=public` exports (or point the default
-  at a reachable instance) when running suites here. Also validated:
+- **Machine-env sensitivity (root-caused 2026-10-10, AMENDED after deeper
+  audit):** plain `uv run pytest` without a `DB_CONNECTION_URI` export fails
+  on this workstation (62 collection/setup errors). **Cause is
+  merge-caused, not incidental machine shape:** the pre-merge fork's
+  `DBSettings` had no hardcoded default and required the URI via
+  `AliasChoices("HONCHO_DB_CONNECTION_URI", "DB_CONNECTION_URI")`, so env
+  files carrying the old `HONCHO_` key resolved correctly (dev and deployed
+  env files use `HONCHO_DB_CONNECTION_URI` → local 5433 socket-trust DB).
+  Upstream's merged `DBSettings` hardcodes the localhost:5432/postgres
+  default and honors only the `DB_` env prefix — the `HONCHO_` alias was
+  dropped. Tests therefore fall back to an unreachable default. **Blast
+  radius:** the CURRENTLY RUNNING production deployment (systemd user unit
+  `honcho-api.service`, port 8300, WorkingDirectory
+  `~/.local/lib/honcho`, a non-git pre-merge code copy) is unaffected — its
+  code still reads the `HONCHO_` key and resolves 5433 (live check: running
+  since Oct 1, 37 routes, hybrid search present, no error trail). But any
+  **redeployment built from the fast-forwarded repo** will silently target
+  the wrong DB unless its env file gains `DB_CONNECTION_URI=...` (the new
+  canonical key; `HONCHO_DB_CONNECTION_URI` is now consumed only by
+  `migrations/env.py`). Required before next deploy: rename the key in the
+  deployed env file or restore the alias in `DBSettings` (one-line
+  compatibility shim). Verified live: with the merged tree + repo `.env`,
+  `settings.DB.CONNECTION_URI` resolves to the hardcoded
+  `postgres:postgres@localhost:5432/postgres` — wrong for this box.
+  Also validated resolving on the fast-forwarded tree:
   `DERIVER.WRR.ENABLED`, `DERIVER.WRR.WEIGHTS/MIN_SLOTS/MAX_SLOTS/...`,
   `DERIVER.FLUSH_ENABLED` and
-  `DERIVER.REPRESENTATION_BATCH_WORK_UNIT_TARGET_TOKENS` all resolve on the
-  fast-forwarded tree.
+  `DERIVER.REPRESENTATION_BATCH_WORK_UNIT_TARGET_TOKENS`.
 - The disposable-container Gate B/C runs above used
   `DB_CONNECTION_URI=postgresql+psycopg://postgres@127.0.0.1:5434/postgres`
   plus `DB_SCHEMA=public`.
@@ -363,7 +377,13 @@ and the outcome recorded below.
 
 ### Remaining deferred follow-ups (unchanged)
 
-- Push decision for `origin/pi-dev` (320 commits) — explicit, not done here.
+- Push decision for `origin/pi-dev` — DONE 2026-10-10 (`2108bc3b`, then
+  `970ba026`).
+- **DB URI env-key migration before next deployment**: deployed env files
+  still use `HONCHO_DB_CONNECTION_URI`; the merged tree reads only
+  `DB_CONNECTION_URI` (alias dropped). Rename the key in
+  `~/.local/lib/honcho/.env` (and the repo `.env` if desired) or add a
+  compatibility alias in `DBSettings` before rebuilding the deployment.
 - Review the developer `.env` WRR/flush pins when production config is
   advanced.
 - Re-embed existing padded 1536-dim vector rows; `src/db.py` engine
