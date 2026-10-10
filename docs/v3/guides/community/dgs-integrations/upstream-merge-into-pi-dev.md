@@ -340,6 +340,20 @@ and the outcome recorded below.
   env-pinned WRR/flush overrides comes from the developer `.env`
   (`load_dotenv(override=True)`); the `pin_fifo_queue_scheduling` fixture in
   conftest neutralizes those pins for queue tests.
+- **Machine-env sensitivity (root-caused 2026-10-10):** plain
+  `uv run pytest` without a `DB_CONNECTION_URI` export fails on this
+  workstation (62 collection/setup errors: password auth on the default
+  localhost:5432/postgres). The developer `.env` carries no DB URI key — its
+  `HONCHO_DB_CONNECTION_URI` is consumed only by `migrations/env.py`; the
+  app/settings layer upstream-merged to the `DB_` prefix. Identical behavior
+  pre- and post-fast-forward (full suite passed at `2902a153` with the
+  disposable-DB exports), so this is machine-env shape, not a merge defect.
+  Use `DB_CONNECTION_URI=... DB_SCHEMA=public` exports (or point the default
+  at a reachable instance) when running suites here. Also validated:
+  `DERIVER.WRR.ENABLED`, `DERIVER.WRR.WEIGHTS/MIN_SLOTS/MAX_SLOTS/...`,
+  `DERIVER.FLUSH_ENABLED` and
+  `DERIVER.REPRESENTATION_BATCH_WORK_UNIT_TARGET_TOKENS` all resolve on the
+  fast-forwarded tree.
 - The disposable-container Gate B/C runs above used
   `DB_CONNECTION_URI=postgresql+psycopg://postgres@127.0.0.1:5434/postgres`
   plus `DB_SCHEMA=public`.
