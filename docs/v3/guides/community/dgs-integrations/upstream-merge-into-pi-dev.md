@@ -402,15 +402,46 @@ and the outcome recorded below.
      `tests/llm/test_model_config.py` pins the deprecation
      (`DEIVER/SUMMARY/DREAM_PROVIDER` asserted ABSENT from the merged
      template; `DERIVER_MODEL_CONFIG__MODEL` present).
-  **Pre-deploy checklist:** (a) replace `HONCHO_DB_CONNECTION_URI` with
-  `DB_CONNECTION_URI` in the deployed env file, (b) translate all flat
-  model-family keys to their `__`-nested `MODEL_CONFIG` equivalents,
-  (c) verify with `uv run python -c "from src.config import settings; ..."`
-  that `DERIVER/SUMMARY/DREAM.MODEL_CONFIG` and `DB.CONNECTION_URI` resolve
-  to the intended values, (d) only then rebuild the deployment from the
+  **Pre-deploy checklist (VALIDATED end to end 2026-10-10):** (a) replace
+  `HONCHO_DB_CONNECTION_URI` with `DB_CONNECTION_URI` in the deployed env
+  file, (b) translate flat model-family keys to their `__`-nested
+  `MODEL_CONFIG` equivalents per the matrix below, (c) verify with
+  `uv run python -c "from src.config import settings; ..."` that
+  `DERIVER/SUMMARY/DREAM` sub-configs and `DB.CONNECTION_URI` resolve to
+  the intended values, (d) only then rebuild the deployment from the
   fast-forwarded repo. (Alternative: add a compat shim in `DBSettings`
-  plus a flat-key translator in `config.py`, but the upstream-canonical
-  rename is the lower-risk path.)
+  plus a flat-key translator, but the upstream-canonical rename is the
+  lower-risk path.)
+
+  **Translation matrix (each entry verified resolving on the merged
+  tree with demo values):**
+
+  | Flat key (deployed) | Canonical merged key (all `__`-nested) |
+  |---|---|
+  | `DERIVER_PROVIDER` + `DERIVER_MODEL` | `DERIVER__MODEL_CONFIG__MODEL` — transport from `provider` via the `provider/model` shorthand (`openai/...`, `anthropic/...`, `gemini/...`; non-shorthand implies openai transport) |
+  | `DERIVER_MAX_OUTPUT_TOKENS` | `DERIVER__MODEL_CONFIG__MAX_OUTPUT_TOKENS` |
+  | `DERIVER_THINKING_BUDGET_TOKENS` | `DERIVER__MODEL_CONFIG__THINKING_BUDGET_TOKENS` |
+  | `DERIVER_BACKUP_PROVIDER` + `DERIVER_BACKUP_MODEL` | `DERIVER__MODEL_CONFIG__FALLBACK__MODEL` (independent fallback config, `FallbackModelSettings`) |
+  | `DERIVER_DEDUPLICATE` | `DERIVER__DEDUPLICATE` | 
+  | `SUMMARY_PROVIDER` + `SUMMARY_MODEL` | `SUMMARY__MODEL_CONFIG__MODEL` |
+  | `SUMMARY_THINKING_BUDGET_TOKENS` | `SUMMARY__MODEL_CONFIG__THINKING_BUDGET_TOKENS` |
+  | `SUMMARY_BACKUP_PROVIDER` + `SUMMARY_BACKUP_MODEL` | `SUMMARY__MODEL_CONFIG__FALLBACK__MODEL` |
+  | `DREAM_DEDUCTION_MODEL` | `DREAM__DEDUCTION_MODEL_CONFIG__MODEL` |
+  | `DREAM_INDUCTION_MODEL` | `DREAM__INDUCTION_MODEL_CONFIG__MODEL` |
+  | `DREAM_SYNTHESIS_MODEL` | `DREAM__INDUCTION_MODEL_CONFIG__*` — merged `SynthesisSpecialist.get_model_config()` deliberately reuses `DREAM.INDUCTION_MODEL_CONFIG` (quality-over-quantity defaults) |
+  | `DREAM_MAX_TOOL_ITERATIONS` | `DREAM__MAX_TOOL_ITERATIONS` |
+  | `DREAM_DOCUMENT_THRESHOLD` | `DREAM__DOCUMENT_THRESHOLD` |
+  | `DREAM_IDLE_TIMEOUT_MINUTES` | `DREAM__IDLE_TIMEOUT_MINUTES` |
+  | `DREAM_MIN_HOURS_BETWEEN_DREAMS` | `DREAM__MIN_HOURS_BETWEEN_DREAMS` |
+  | `DREAM_PROVIDER` / `DREAM_MODEL` | no merged equivalent — merged `DreamSettings` has no top-level model config; the dream agents resolve each specialist from `DEDUCTION`/`INDUCTION_MODEL_CONFIG` independently (upstream's own defaults: `openai/gpt-5.4-mini`) |
+  | `DREAM_BACKUP_PROVIDER` / `DREAM_BACKUP_MODEL` | no merged equivalent — `DreamSettings` dropped the `BackupLLMSettingsMixin` and fallback support wholesale |
+  | `DREAM_MAX_OUTPUT_TOKENS` / `DREAM_THINKING_BUDGET_TOKENS` | no single equivalent — set per sub-config: `DREAM__DEDUCTION_MODEL_CONFIG__MAX_OUTPUT_TOKENS` / `DREAM__INDUCTION_MODEL_CONFIG__MAX_OUTPUT_TOKENS` (and `__THINKING_BUDGET_TOKENS`) |
+
+  Also unchanged and non-blocking: `LOG_LEVEL` and `ALLOWED_IP_NETWORKS`
+  are top-level (no prefix) and bind on the merged tree as-is; API keys
+  (`OPENAI_API_KEY`, `OLLAMA_API_KEY`, `Gemini`/`Vertex`/`HF`/`Brave`/
+  `Exa`...) are consumed by third-party SDKs directly from the process env
+  (not modeled by settings) - unaffected by the merge.
 - Review the developer `.env` WRR/flush pins when production config is
   advanced.
 - Re-embed existing padded 1536-dim vector rows; `src/db.py` engine
