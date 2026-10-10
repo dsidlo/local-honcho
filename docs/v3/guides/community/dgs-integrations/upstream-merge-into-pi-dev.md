@@ -379,11 +379,38 @@ and the outcome recorded below.
 
 - Push decision for `origin/pi-dev` — DONE 2026-10-10 (`2108bc3b`, then
   `970ba026`).
-- **DB URI env-key migration before next deployment**: deployed env files
-  still use `HONCHO_DB_CONNECTION_URI`; the merged tree reads only
-  `DB_CONNECTION_URI` (alias dropped). Rename the key in
-  `~/.local/lib/honcho/.env` (and the repo `.env` if desired) or add a
-  compatibility alias in `DBSettings` before rebuilding the deployment.
+- **Env-key migration surface before next deployment (full audit
+  2026-10-10, second amendment):** two independent gaps between this box's
+  env files and the merged settings schema:
+  1. *DB URI key (as above).* `HONCHO_DB_CONNECTION_URI` alias dropped;
+     merged `DBSettings` hardcodes the localhost:5432/postgres default and
+     honors only `DB_CONNECTION_URI`.
+  2. **Flat model-selection keys are silently INERT post-merge.** The
+     pre-merge deployed code (WorkingDirectory `~/.local/lib/honcho`, zero
+     `MODEL_CONFIG` refs in its shipped config.py) reads
+     `DERIVER_PROVIDER`/`DERIVER_MODEL`/`DERIVER_BACKUP_*`,
+     `SUMMARY_PROVIDER`/`SUMMARY_MODEL`/`SUMMARY_*`, and
+     `DREAM_PROVIDER`/`DREAM_MODEL`/`DREAM_*` flat keys directly. Upstream's
+     merged schema models these as nested `MODEL_CONFIG`
+     (`ConfiguredModelSettings`) under `DERIVER__MODEL_CONFIG__*`,
+     `SUMMARY__MODEL_CONFIG__*`, `DREAM__*_MODEL_CONFIG__*` and sets
+     `extra="ignore"` — so all ~25 deployed flat model-family keys are
+     accepted but **bind to nothing**. Verified empirically: with the flat
+     keys set via CLI env, merged settings resolves
+     `DERIVER.MODEL_CONFIG.PROVIDER/MODEL/BACKUP_*` to `None` and boots
+     fine on upstream defaults. Upstream's own
+     `tests/llm/test_model_config.py` pins the deprecation
+     (`DEIVER/SUMMARY/DREAM_PROVIDER` asserted ABSENT from the merged
+     template; `DERIVER_MODEL_CONFIG__MODEL` present).
+  **Pre-deploy checklist:** (a) replace `HONCHO_DB_CONNECTION_URI` with
+  `DB_CONNECTION_URI` in the deployed env file, (b) translate all flat
+  model-family keys to their `__`-nested `MODEL_CONFIG` equivalents,
+  (c) verify with `uv run python -c "from src.config import settings; ..."`
+  that `DERIVER/SUMMARY/DREAM.MODEL_CONFIG` and `DB.CONNECTION_URI` resolve
+  to the intended values, (d) only then rebuild the deployment from the
+  fast-forwarded repo. (Alternative: add a compat shim in `DBSettings`
+  plus a flat-key translator in `config.py`, but the upstream-canonical
+  rename is the lower-risk path.)
 - Review the developer `.env` WRR/flush pins when production config is
   advanced.
 - Re-embed existing padded 1536-dim vector rows; `src/db.py` engine
