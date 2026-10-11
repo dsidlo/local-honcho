@@ -336,6 +336,69 @@
         }
       }
     },
+    "/v3/workspaces/{workspace_id}/documents/search": {
+      "post": {
+        "tags": [
+          "workspaces"
+        ],
+        "summary": "Search Documents",
+        "description": "Search documents/conclusions using hybrid search (vector + FTS + trigram).\n\nCombines semantic vector search with PostgreSQL full-text search and trigram\nfuzzy matching for improved retrieval. Results are optionally reranked using\na cross-encoder when enabled in configuration.\n\nArgs:\n    workspace_id: Workspace to search in\n    body: Search parameters including:\n        - query: Search query text\n        - observer: Peer making the observation\n        - observed: Peer being observed\n        - top_k: Number of results (default 10)\n        - distance: Max cosine distance threshold (optional)\n        - method: Fusion method - \"rrf\" (default), \"weighted\", or \"cascade\"\n        - filters: Additional filters (level, session_name)\n\nReturns:\n    List of matching conclusions ranked by relevance",
+        "operationId": "search_documents_v3_workspaces__workspace_id__documents_search_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentSearch",
+                "description": "Document search parameters"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Conclusion"
+                  },
+                  "title": "Response Search Documents V3 Workspaces  Workspace Id  Documents Search Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v3/workspaces/{workspace_id}/queue/status": {
       "get": {
         "tags": [
@@ -4379,7 +4442,8 @@
               "explicit",
               "deductive",
               "inductive",
-              "contradiction"
+              "contradiction",
+              "synthesis"
             ],
             "title": "Level",
             "description": "Reasoning level of the conclusion: 'explicit' (directly extracted from messages) or 'deductive'/'inductive'/'contradiction' (derived during dreaming).",
@@ -4628,6 +4692,16 @@
             "description": "Level of reasoning to apply: minimal, low, medium, high, or max",
             "default": "low"
           },
+          "conclusion_search": {
+            "type": "string",
+            "enum": [
+              "vector",
+              "rrf"
+            ],
+            "title": "Conclusion Search",
+            "description": "How conclusion recall ranks. 'vector' is cosine distance. 'rrf' fuses vector, full text, and trigram. The Grok integration sends 'rrf'. Other clients keep the vector default.",
+            "default": "vector"
+          },
           "response_format": {
             "anyOf": [
               {
@@ -4653,6 +4727,76 @@
           "query"
         ],
         "title": "DialecticOptions"
+      },
+      "DocumentSearch": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "description": "Search query"
+          },
+          "observer": {
+            "type": "string",
+            "title": "Observer",
+            "description": "Peer making the observation"
+          },
+          "observed": {
+            "type": "string",
+            "title": "Observed",
+            "description": "Peer being observed"
+          },
+          "top_k": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "description": "Number of results to return",
+            "default": 10
+          },
+          "distance": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Distance"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "rrf",
+              "weighted",
+              "cascade"
+            ],
+            "title": "Method",
+            "default": "rrf"
+          },
+          "filters": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filters"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query",
+          "observer",
+          "observed"
+        ],
+        "title": "DocumentSearch",
+        "description": "Search parameters for hybrid document search (local fork)."
       },
       "DreamConfiguration": {
         "properties": {
@@ -6733,7 +6877,8 @@
               "explicit",
               "deductive",
               "inductive",
-              "contradiction"
+              "contradiction",
+              "synthesis"
             ],
             "title": "Level",
             "type": "string"

@@ -1,0 +1,18 @@
+# Merge this table into ~/.grok/config.toml.
+# Do not replace that file. The user's CLI, UI, and marketplace tables stay.
+#
+# `args` points at the installed copy. Until Phase 2 is approved, a dry run
+# can point at the repo copy instead:
+#   docs/v3/guides/community/dgs-integrations/grok-build/src/honcho/mcp_server.py
+#
+# honcho_ask is the slow tool. The per-tool timeout covers a dialectic call.
+# The other tools should return in well under half a minute.
+
+[mcp_servers.honcho]
+command = "python3"
+args = ["/home/dsidlo/.grok/honcho/mcp_server.py"]
+enabled = false
+startup_timeout_sec = 10
+tool_timeout_sec = 30
+tool_timeouts = { honcho_ask = 120, honcho_conclusions = 30, honcho_search = 20, honcho_store = 20 }
+env = { HONCHO_BASE_URL = "http://localhost:8300", HONCHO_USER = "dsidlo", HONCHO_AGENT_PEER = "agent-grok" }

@@ -7,6 +7,7 @@ using the DialecticAgent.
 
 import logging
 from collections.abc import AsyncIterator
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -57,6 +58,7 @@ async def agentic_chat(
     session_allowlist: list[str] | None = None,
     response_model: type[BaseModel] | None = None,
     evidence: EvidenceAccumulator | None = None,
+    conclusion_search: Literal["vector", "rrf"] = "vector",
 ) -> str:
     """
     Answer a query about a peer using the agentic dialectic.
@@ -124,6 +126,7 @@ async def agentic_chat(
         reasoning_level=reasoning_level,
         session_allowlist=session_allowlist,
         evidence=evidence,
+        conclusion_search=conclusion_search,
     )
 
     return await agent.answer(query, response_model=response_model)
@@ -139,6 +142,7 @@ async def agentic_chat_stream(
     session_allowlist: list[str] | None = None,
     response_model: type[BaseModel] | None = None,
     evidence: EvidenceAccumulator | None = None,
+    conclusion_search: Literal["vector", "rrf"] = "vector",
 ) -> AsyncIterator[str]:
     """
     Stream an answer to a query about a peer using the agentic dialectic.
@@ -207,6 +211,7 @@ async def agentic_chat_stream(
         reasoning_level=reasoning_level,
         session_allowlist=session_allowlist,
         evidence=evidence,
+        conclusion_search=conclusion_search,
     )
 
     async for chunk in agent.answer_stream(query, response_model=response_model):

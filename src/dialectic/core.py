@@ -8,7 +8,7 @@ and synthesize responses to queries about a peer.
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from nanoid import generate as generate_nanoid
 from pydantic import BaseModel
@@ -79,6 +79,7 @@ class DialecticAgent:
         session_id: str | None = None,
         session_allowlist: list[str] | None = None,
         evidence: EvidenceAccumulator | None = None,
+        conclusion_search: Literal["vector", "rrf"] = "vector",
     ):
         """
         Initialize the dialectic agent.
@@ -110,6 +111,7 @@ class DialecticAgent:
         self.observed_peer_card: list[str] | None = observed_peer_card
         self.metric_key: str | None = metric_key
         self.reasoning_level: ReasoningLevel = reasoning_level
+        self.conclusion_search: Literal["vector", "rrf"] = conclusion_search
 
         # Initialize conversation history with system prompt
         self.messages: list[dict[str, str]] = [
@@ -271,6 +273,7 @@ class DialecticAgent:
                 embedding=query_embedding,
                 session_allowlist=self.session_allowlist,
                 documents_out=prefetched,
+                method=self.conclusion_search,
             )
 
             derived_repr = await search_memory(
@@ -283,6 +286,7 @@ class DialecticAgent:
                 embedding=query_embedding,
                 session_allowlist=self.session_allowlist,
                 documents_out=prefetched,
+                method=self.conclusion_search,
             )
 
             if explicit_repr.is_empty() and derived_repr.is_empty():
@@ -408,6 +412,7 @@ class DialecticAgent:
             agent_type="dialectic",
             parent_category="dialectic",
             evidence=self.evidence,
+            conclusion_search=self.conclusion_search,
         )
 
     def _prefetch_heading(self) -> str:

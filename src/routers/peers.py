@@ -386,6 +386,7 @@ async def chat(
                     session_allowlist=session_allowlist,
                     response_model=response_model,
                     evidence=evidence,
+                    conclusion_search=options.conclusion_search,
                 ),
                 evidence,
             ),
@@ -405,6 +406,7 @@ async def chat(
         session_allowlist=session_allowlist,
         response_model=response_model,
         evidence=evidence,
+        conclusion_search=options.conclusion_search,
     )
 
     # Prometheus metrics

@@ -1,0 +1,15 @@
+[Unit]
+Description=Tail Grok chat journals into local Honcho
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/dsidlo/.grok/honcho/tailer.py
+Restart=on-failure
+RestartSec=5
+Environment=HONCHO_BASE_URL=http://localhost:8300
+Environment=HONCHO_USER=dsidlo
+Environment=HONCHO_AGENT_PEER=agent-grok
+
+[Install]
+WantedBy=default.target

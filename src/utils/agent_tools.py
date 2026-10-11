@@ -4,7 +4,7 @@ import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -1301,6 +1301,50 @@ async def get_recent_history(
         return []
 
 
+async def _load_conclusion_documents(
+    *,
+    workspace_name: str,
+    observer: str,
+    observed: str,
+    query: str,
+    top_k: int,
+    embedding: list[float] | None,
+    filters: dict[str, Any] | None,
+    method: Literal["vector", "rrf"] = "vector",
+) -> Sequence[models.Document]:
+    """Load conclusion rows for one pair.
+
+    ``vector`` is cosine distance. ``rrf`` fuses that with full text and
+    trigram similarity. The session is closed before the rows are returned.
+    """
+    if method == "rrf":
+        async with tracked_db("search_memory.rrf", read_only=True) as db:
+            documents = await crud.query_documents_hybrid(
+                db,
+                workspace_name,
+                query,
+                observer=observer,
+                observed=observed,
+                embedding=embedding,
+                filters=filters,
+                top_k=top_k,
+                method="rrf",
+            )
+            for doc in documents:
+                db.expunge(doc)
+            return list(documents)
+    return await crud.query_documents(
+        db=None,
+        workspace_name=workspace_name,
+        observer=observer,
+        observed=observed,
+        query=query,
+        top_k=top_k,
+        filters=filters,
+        embedding=embedding,
+    )
+
+
 async def search_memory(
     workspace_name: str,
     observer: str,
@@ -1311,12 +1355,13 @@ async def search_memory(
     embedding: list[float] | None = None,
     session_allowlist: list[str] | None = None,
     documents_out: list[models.Document] | None = None,
+    method: Literal["vector", "rrf"] = "vector",
 ) -> Representation:
     """
-    Search for observations in memory using semantic similarity.
+    Search for observations in memory.
 
-    Does not require a DB session — ``query_documents`` manages its own
-    short-lived sessions so no connection is held during external calls.
+    ``method="vector"`` is cosine distance. ``method="rrf"`` is the hybrid
+    fusion. Does not require a DB session from the caller.
 
     Args:
         workspace_name: Workspace identifier
@@ -1351,8 +1396,7 @@ async def search_memory(
     if session_allowlist is not None:
         filters["session_name"] = {"in": session_allowlist}
 
-    documents = await crud.query_documents(
-        db=None,
+    documents = await _load_conclusion_documents(
         workspace_name=workspace_name,
         observer=observer,
         observed=observed,
@@ -1360,6 +1404,7 @@ async def search_memory(
         top_k=limit,
         filters=filters or None,
         embedding=embedding,
+        method=method,
     )
 
     if documents_out is not None:
@@ -1579,6 +1624,9 @@ class ToolContext:
     # they loaded; `dataclasses.replace` copies of this context share the same
     # accumulator, so delegating handlers reach it without extra wiring.
     evidence: EvidenceAccumulator | None = None
+    # Peer dialectic sets this from the chat request. "rrf" is the Grok
+    # integration. Other agents leave the vector default.
+    conclusion_search: Literal["vector", "rrf"] = "vector"
 
 
 def _normalize_observation_id(obs_id: str) -> str:
@@ -2102,8 +2150,7 @@ async def _handle_search_memory(
     if ctx.session_allowlist is not None and not ctx.session_allowlist:
         documents = []
     else:
-        documents = await crud.query_documents(
-            db=None,
+        documents = await _load_conclusion_documents(
             workspace_name=ctx.workspace_name,
             observer=ctx.observer,
             observed=ctx.observed,
@@ -2116,6 +2163,7 @@ async def _handle_search_memory(
             }
             if ctx.session_allowlist is not None
             else None,
+            method=ctx.conclusion_search,
         )
     _record_conclusion_evidence(ctx, documents)
     mem = Representation.from_documents(documents)
@@ -2818,6 +2866,7 @@ async def create_tool_executor(
     session_allowlist: list[str] | None = None,
     handler_resolver: Callable[[str], Any] | None = None,
     evidence: EvidenceAccumulator | None = None,
+    conclusion_search: Literal["vector", "rrf"] = "vector",
 ) -> Callable[[str, dict[str, Any]], Any]:
     """
     Create a unified tool executor function for all agent operations.
@@ -2871,6 +2920,7 @@ async def create_tool_executor(
         agent_type=agent_type,
         parent_category=parent_category,
         evidence=evidence,
+        conclusion_search=conclusion_search,
     )
 
     async def execute_tool(tool_name: str, tool_input: dict[str, Any]) -> str:

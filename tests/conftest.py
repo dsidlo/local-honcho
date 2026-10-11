@@ -85,6 +85,8 @@ _RUNTIME_MOCK_TEST_BLOCKLIST_PREFIXES = (
     # LLM transport tests mock providers directly and don't need database/runtime setup.
     "tests/utils/test_length_finish_reason.py",
     "tests/utils/test_clients.py",
+    # Conclusion-search branch test stubs query_documents and tracked_db.
+    "tests/utils/test_conclusion_search_method.py",
     # Session-scope SQL shape — asserts on compiled statements, never executes one.
     "tests/crud/test_session_scope_clauses.py",
     # Pure prompt-rendering tests — string assembly only, no DB needed.
@@ -300,7 +302,8 @@ async def setup_test_database(db_url: URL):
     Returns:
         engine: SQLAlchemy engine
     """
-    engine = create_async_engine(str(db_url), echo=False)
+    # Pass the URL object. str(URL) masks the password as "***" in SQLAlchemy 2.
+    engine = create_async_engine(db_url, echo=False)
     async with engine.connect() as conn:
         try:
             logger.info("Attempting to create pgvector extension...")

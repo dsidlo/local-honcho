@@ -130,7 +130,9 @@ class DocumentSearch(BaseModel):
     query: str = Field(..., description="Search query")
     observer: str = Field(..., description="Peer making the observation")
     observed: str = Field(..., description="Peer being observed")
-    top_k: int = Field(default=10, ge=1, le=100, description="Number of results to return")
+    top_k: int = Field(
+        default=10, ge=1, le=100, description="Number of results to return"
+    )
     distance: float | None = Field(default=None, ge=0.0, le=1.0)
     method: Literal["rrf", "weighted", "cascade"] = Field(default="rrf")
     filters: dict[str, Any] | None = None
@@ -826,6 +828,14 @@ class DialecticOptions(BaseModel):
     reasoning_level: ReasoningLevel = Field(
         default="low",
         description="Level of reasoning to apply: minimal, low, medium, high, or max",
+    )
+    conclusion_search: Literal["vector", "rrf"] = Field(
+        default="vector",
+        description=(
+            "How conclusion recall ranks. 'vector' is cosine distance. "
+            "'rrf' fuses vector, full text, and trigram. The Grok integration "
+            "sends 'rrf'. Other clients keep the vector default."
+        ),
     )
     response_format: dict[str, Any] | None = Field(
         None,
