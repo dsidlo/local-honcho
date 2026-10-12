@@ -67,11 +67,14 @@ uv run pytest docs/v3/guides/community/dgs-integrations/jcode/tests/test_secret_
 
 ## Coverage notes
 
-100% statement + branch coverage covers the subprocess children too: the MCP
-server and tailer run as real processes in the end-to-end suites. Local Honcho
-ships an `a1_coverage.pth` that starts `coverage.process_startup()` in any
-child interpreter when `COVERAGE_PROCESS_START` is set, so `run-coverage.sh`
-sets it and combines the parallel data files afterward (`coverage combine`).
+The 100% gate covers `src/` (the integration code) in both modes; without a
+live Honcho the `@live`-marked e2e suites skip and full-tree coverage reads
+~95% (test-file lines), which the runner prints informationally. Coverage of
+the subprocess children is real: the MCP server and tailer run as actual
+processes in the e2e suites. Local Honcho ships an `a1_coverage.pth` that
+starts `coverage.process_startup()` in any child interpreter when
+`COVERAGE_PROCESS_START` is set, so `run-coverage.sh` sets it and combines
+the parallel data files afterward (`coverage combine`).
 The two source-side exclusions are documented `# pragma: no branch` markers on
 mathematically unreachable chunker arcs; two test-helper paths unreachable
 while Honcho is up carry `# pragma: no cover` with an explanation.
