@@ -9,7 +9,7 @@ CWD="${JCODE_HOOK_CWD:-$PWD}"
 MODEL="${JCODE_HOOK_MODEL:-}"
 STATUS="${JCODE_HOOK_STATUS:-}"
 DURATION="${JCODE_HOOK_DURATION_MS:-}"
-HONCHO="http://localhost:8300/v3"
+HONCHO="${HONCHO_BASE_URL:-http://localhost:8300}/v3"
 
 # Workspace from git origin (same rule as pi); fall back to jcode global ws
 WS=$(python3 - "$CWD" <<'EOF'
@@ -35,9 +35,11 @@ post() {
   curl -s -m 10 -X POST "$HONCHO/workspaces/$WS/sessions" \
     -H 'Content-Type: application/json' \
     -d "{\"id\":\"jcode-$SID\",\"peers\":{\"dsidlo\":{},\"agent-jcode\":{}}}" >/dev/null 2>&1
+  # second arg optional: markers without extra payloads skip the message POST
+  [ -n "${2:-}" ] || return 0
   curl -s -m 10 -X POST "$HONCHO/workspaces/$WS/sessions/jcode-$SID/messages" \
     -H 'Content-Type: application/json' \
-    -d "$1" >/dev/null 2>&1
+    -d "$2" >/dev/null 2>&1
 }
 
 case "$EVENT" in

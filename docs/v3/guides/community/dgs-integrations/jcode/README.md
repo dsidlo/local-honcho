@@ -30,7 +30,8 @@ jcode/
 |---|---|---|
 | `tests/test_honcho_mcp_unit.py` | scrubbing, chunking, workspace detection, tool handlers vs fake API, stdio protocol loop | offline |
 | `tests/test_tailer_unit.py` | journal parsing, mapper, spool/retry, state persistence, main loop | offline |
-| `tests/test_secret_gate.py` | secret-gate hook allow/block cases | offline |
+| `tests/test_secret_gate.py` | secret-gate hook allow/block cases (incl. all credential-assignment regexes) | offline |
+| `tests/test_capture_hook.py` | capture hook markers vs an in-process fake Honcho (session/turn lifecycle, fire-and-forget) | offline |
 | `tests/test_honcho_mcp.py` | MCP server end-to-end vs live Honcho, isolated workspace | live Honcho |
 | `tests/test_tailer.py` | tailer end-to-end + restart-no-duplicates | live Honcho |
 
@@ -39,6 +40,10 @@ Isolation invariant: live suites write only to throwaway
 `jcode`, `flexitts`, and pi-mono workspaces are never touched. Suites tagged
 `@pytest.mark.live` skip cleanly when no Honcho is reachable at
 `:8300` (health probe `/health`).
+
+The capture-hook suite is fully hermetic: it runs the hook against an
+in-process `ThreadingHTTPServer` fake, so no port conflicts and no real
+records anywhere.
 
 ### Run everything
 
@@ -72,3 +77,11 @@ Two behavioral fixes were made in `src/` while writing the tests:
 - `jcode_honcho_tailer.spool`: `os.makedirs` ran outside the fail-open try
   block, so an unwritable spool path could crash the tailer; now fully
   fail-open per the capture contract.
+- `jcode_honcho_capture.sh`: made testable without behavior change —
+  `HONCHO_BASE_URL` env override honored (was hardcoded to localhost), and
+  the redundant empty message POST after session creation was dropped.
+
+Bash sources are covered behaviorally through their pytest drivers (the
+secret-gate and capture suites execute the real scripts over subprocess
+and record their HTTP effects); `coverage.py` measures the Python
+modules, not bash, so the 100% gate below applies to `.py` files.
