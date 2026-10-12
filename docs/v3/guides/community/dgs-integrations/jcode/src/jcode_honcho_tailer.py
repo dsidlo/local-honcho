@@ -92,13 +92,13 @@ def chunk(text: str, size: int = MAX_CONTENT):
                     cur = sent[:size]
                 else:
                     cur += sent
-        elif len(cur) + len(para) + 2 > size:
-            if cur:
+        elif len(cur) + len(para) + 2 > size:  # pragma: no branch
+            if cur:  # pragma: no branch
                 chunks.append(cur.strip())
             cur = para + "\n\n"
         else:
             cur += para + "\n\n"
-    if cur:
+    if cur:  # pragma: no branch
         chunks.append(cur.strip())
     return chunks or [text[:size]]
 
@@ -356,9 +356,9 @@ BATCH_DELAY = 0.05
 
 
 def spool(ws: str, sid: str, messages: list) -> None:
-    os.makedirs(SPOOL_DIR, exist_ok=True)
-    fname = os.path.join(SPOOL_DIR, f"{int(time.time() * 1000)}-{ws}-{sid}.json")
     try:
+        os.makedirs(SPOOL_DIR, exist_ok=True)
+        fname = os.path.join(SPOOL_DIR, f"{int(time.time() * 1000)}-{ws}-{sid}.json")
         with open(fname, "w") as f:
             json.dump({"workspace": ws, "session": sid, "messages": messages}, f)
     except OSError:

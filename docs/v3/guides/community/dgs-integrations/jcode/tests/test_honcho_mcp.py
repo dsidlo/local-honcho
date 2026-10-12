@@ -11,6 +11,7 @@ Run: pytest tests/test_honcho_mcp.py (needs a live Honcho at localhost:8300)
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -33,7 +34,7 @@ def _honcho_up() -> bool:
     try:
         with urllib.request.urlopen(f"{BASE}/health", timeout=2) as r:
             return r.status == 200
-    except Exception:
+    except Exception:  # pragma: no cover - hit only when Honcho is not running
         return False
 
 
@@ -75,7 +76,8 @@ class MCPServer:
         return resp["result"]["content"][0]["text"]
 
     def close(self):
-        self.proc.terminate()
+        # SIGINT (not SIGTERM) so coverage's atexit handler can flush child data
+        self.proc.send_signal(signal.SIGINT)
 
 
 def _load_mcp_module():
@@ -150,8 +152,14 @@ def test_conclusions_empty_workspace_handled(mcp):
 
 @requires_live
 def test_dialectic_ask_returns_content(mcp):
+    # dialectic latency can spike under load; tolerate one transient timeout
+    # dialectic latency can spike under load; tolerate one transient timeout
     out = mcp.call("honcho_ask", {"query": "Reply in one short sentence: what is stored in this session?",
                                   "reasoning_level": "minimal", "workspace": WS})
+    if "error: timed out" in out.lower():  # pragma: no cover - transient load spike
+        time.sleep(2)
+        out = mcp.call("honcho_ask", {"query": "Reply in one short sentence: what is stored in this session?",
+                                      "reasoning_level": "minimal", "workspace": WS})
     assert len(out) > 10 and "error" not in out.lower()[:20], out[:150]
 
 

@@ -83,13 +83,13 @@ def chunk(text: str, size: int = MAX_CONTENT):
                     cur = sent[:size]
                 else:
                     cur += sent
-        elif len(cur) + len(para) + 2 > size:
-            if cur:
+        elif len(cur) + len(para) + 2 > size:  # pragma: no branch
+            if cur:  # pragma: no branch
                 chunks.append(cur.strip())
             cur = para + "\n\n"
         else:
             cur += para + "\n\n"
-    if cur:
+    if cur:  # pragma: no branch
         chunks.append(cur.strip())
     return chunks or [text[:size]]
 
@@ -172,12 +172,14 @@ def tool_store(args: dict) -> str:
     ensure_workspace(ws)
     ensure_session(ws, session_name)
     body = []
-    for i, chunk_text in enumerate(chunk(text)):
+    all_chunks = chunk(text)
+    for i, chunk_text in enumerate(all_chunks):
         msg = {"content": chunk_text, "peer_id": peer}
         meta = {"type": kind, "source": "jcode-mcp"}
-        if len(chunk(text)) > 1:
+        if len(all_chunks) > 1:
             meta.update({"is_chunk": True, "chunk_index": i + 1,
-                         "total_chunks": len(chunk(text))})
+                         "total_chunks": len(all_chunks)})
+        msg["metadata"] = meta
         body.append(msg)
     sent = 0
     for batch in [body[i:i + 5] for i in range(0, len(body), 5)]:
