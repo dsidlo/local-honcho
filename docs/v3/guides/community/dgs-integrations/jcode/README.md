@@ -24,6 +24,12 @@ jcode/
 └── run-coverage.sh          runs everything with a 100% coverage gate
 ```
 
+Not mirrored here: `skills/` (honcho-ask, honcho-brief, honcho-promote),
+`bin/honcho-*` CLI helpers (ask, brief, model-check, failover-watch), and
+systemd units. They live in the production repo and `bin/install.sh` syncs
+them to `~/.jcode/skills` and `~/bin`; this tree mirrors exactly the parts
+that execute inside jcode (MCP server, tailer, hooks).
+
 ## Tests
 
 | Suite | Scope | Needs |
