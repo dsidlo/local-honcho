@@ -475,10 +475,23 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("context", async (event, ctx) => {
     honchoLog("DEBUG", "EVENT: context");
-    const assistantMessages = event.messages.filter(m => m.role === "assistant" && (m.tool_calls || m.content?.some(c => c.type === "text")));
+    const assistantMessages = event.messages.filter(m => {
+      if (m.role !== "assistant") return false;
+      if (m.tool_calls) return true;
+      const content = m.content;
+      if (typeof content === 'string') return content.length > 0;
+      if (Array.isArray(content)) return content.some(c => c.type === "text");
+      return false;
+    });
     const lastAssistant = assistantMessages[assistantMessages.length - 1];
-    if (lastAssistant?.content) {
-      const thoughtText = lastAssistant.content.filter(c => c.type === "text").map(c => c.text).join("");
+    const content = lastAssistant?.content;
+    if (content) {
+      let thoughtText = '';
+      if (typeof content === 'string') {
+        thoughtText = content;
+      } else if (Array.isArray(content)) {
+        thoughtText = content.filter(c => c.type === "text").map(c => c.text).join("");
+      }
       if (thoughtText) {
         honchoLog("DEBUG", "context: captured thought", { length: thoughtText.length });
         await queueMessage(`Thought: ${thoughtText}`, HONCHO_PEER_ID, { type: "thought", step: "planning", model: currentModel });
@@ -493,7 +506,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event, ctx) => {
-    const outputText = event.result?.content?.map((c: any) => c.type === "text" ? c.text : "").join("") || "";
+    const content = event.result?.content;
+    let outputText = '';
+    if (typeof content === 'string') {
+      outputText = content;
+    } else if (Array.isArray(content)) {
+      outputText = content.map((c: any) => c.type === "text" ? c.text : "").join("");
+    }
     const willBeChunked = outputText.length > MAX_CONTENT_LENGTH;
     honchoLog("DEBUG", "EVENT: tool_result", { tool: event.toolName, outputLength: outputText.length, willBeChunked });
     
@@ -508,7 +527,13 @@ export default function (pi: ExtensionAPI) {
     if (!event.message) return;
     
     if (event.message.role === "assistant") {
-      const responseText = event.message.content?.map(c => c.type === "text" ? c.text : "").join("") || "";
+      const content = event.message.content;
+      let responseText = '';
+      if (typeof content === 'string') {
+        responseText = content;
+      } else if (Array.isArray(content)) {
+        responseText = content.map(c => c.type === "text" ? c.text : "").join("");
+      }
       honchoLog("DEBUG", "turn_end: captured response", { length: responseText.length });
       await queueMessage(responseText, HONCHO_PEER_ID, { role: "assistant", type: "final", turn_index: event.turnIndex, model: currentModel });
     }
@@ -604,7 +629,15 @@ export default function (pi: ExtensionAPI) {
     }
 
     const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
-    const convText = allMessages.map(m => `[${m.role}]: ${m.content?.map((c: any) => c.text || '').join('')}`).join('\n');
+    const convText = allMessages.map(m => {
+      const content = m.content;
+      if (typeof content === 'string') {
+        return `[${m.role}]: ${content}`;
+      } else if (Array.isArray(content)) {
+        return `[${m.role}]: ${content.map((c: any) => c.text || '').join('')}`;
+      }
+      return `[${m.role}]: [${m.content?.type || 'unknown'} content]`;
+    }).join('\n');
     honchoLog("DEBUG", "session_before_compact: queuing messages", { messageCount: allMessages.length });
     
     await queueMessage(convText, HONCHO_PEER_ID, { type: 'obs_extraction', session_part: 'compact' });
@@ -726,35 +759,102 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "honcho_list_documents", label: "List Documents",
-    parameters: Type.Object({ limit: Type.Number({ default: 20 }) }),
+    name: "honcho_list_documents", label: "List Documents", description: "List documents from Honcho agentic memory",
+    parameters: Type.Object({ 
+      limit: Type.Number({ default: 20 }),
+      observer: Type.Optional(Type.String({ default: HONCHO_PEER_ID })),
+      observed: Type.Optional(Type.String({ default: HONCHO_USER }))
+    }),
     async execute(_toolCallId, params) {
-      honchoLog("INFO", "TOOL: honcho_list_documents");
+      honchoLog("INFO", "TOOL: honcho_list_documents", { observer: params.observer, observed: params.observed });
       try {
-        const result = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/documents?limit=${params.limit}`, { method: "GET" });
-        return { content: [{ type: "text", text: result.map((d: any) => `- ${d.name}`).join("\n") }] };
+        // Use POST /v3/workspaces/{workspace_id}/conclusions/list with filters
+        const result = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/conclusions/list`, {
+          method: "POST",
+          body: JSON.stringify({
+            filters: {
+              observer_id: params.observer || HONCHO_PEER_ID,
+              observed_id: params.observed || HONCHO_USER
+            }
+          })
+        });
+        const docs = result.items || [];
+        const summary = docs.slice(0, params.limit).map((d: any) => {
+          const preview = d.content?.substring(0, 100)?.replace(/\s+/g, ' ') || 'No content';
+          return `- ${d.id} (${d.created_at}): ${preview}...`;
+        }).join("\n");
+        return { content: [{ type: "text", text: `${docs.length} documents total, showing ${Math.min(docs.length, params.limit)}:\n${summary}` }] };
       } catch (e: any) {
         honchoLog("ERROR", "honcho_list_documents failed", e.message);
-        if (e.message.includes('404')) return { content: [{ type: "text", text: "API not ready (404)" }] };
-        throw e;
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   });
 
   pi.registerTool({
-    name: "honcho_search_documents", label: "Search Documents",
-    parameters: Type.Object({ query: Type.String(), limit: Type.Number({ default: 5 }) }),
+    name: "honcho_search_documents", label: "Search Documents", description: "Search documents in Honcho agentic memory",
+    parameters: Type.Object({ 
+      query: Type.String(), 
+      limit: Type.Number({ default: 10 }),
+      observer: Type.Optional(Type.String({ default: HONCHO_PEER_ID })),
+      observed: Type.Optional(Type.String({ default: HONCHO_USER })),
+      distance: Type.Optional(Type.Number({ default: 0.7 }))
+    }),
     async execute(_toolCallId, params) {
-      honchoLog("INFO", "TOOL: honcho_search_documents", { query: params.query.slice(0, 50) });
+      honchoLog("INFO", "TOOL: honcho_search_documents", { 
+        query: params.query.slice(0, 50),
+        observer: params.observer,
+        observed: params.observed
+      });
       try {
-        const result = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/conclusions/query`, {
-          method: "POST", body: JSON.stringify({ query: params.query, top_k: params.limit })
+        // Use POST /v3/workspaces/{workspace_id}/documents/search for hybrid search
+        const result = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/documents/search`, {
+          method: "POST", 
+          body: JSON.stringify({ 
+            query: params.query, 
+            top_k: params.limit,
+            observer: params.observer || HONCHO_PEER_ID,
+            observed: params.observed || HONCHO_USER,
+            distance: params.distance ?? 0.7
+          })
         });
-        return { content: [{ type: "text", text: result.map((d: any) => `[${d.score?.toFixed(2)}] ${d.name}`).join("\n") }] };
+        const docs = result || [];
+        if (docs.length === 0) {
+          return { content: [{ type: "text", text: "No documents found matching your query." }] };
+        }
+        const summary = docs.map((d: any, idx: number) => {
+          const score = typeof d.distance === 'number' ? (1 - d.distance).toFixed(2) : 'N/A';
+          const preview = d.content?.substring(0, 80)?.replace(/\s+/g, ' ') || 'No content';
+          return `${idx + 1}. [Score: ${score}] (${d.id}): ${preview}...`;
+        }).join("\n\n");
+        return { content: [{ type: "text", text: `Found ${docs.length} documents:\n\n${summary}` }] };
       } catch (e: any) {
         honchoLog("ERROR", "honcho_search_documents failed", e.message);
-        if (e.message.includes('404')) return { content: [{ type: "text", text: "Search API not ready (404)" }] };
-        throw e;
+        // Fallback to conclusions/query if documents/search is not available
+        if (e.message.includes('404')) {
+          honchoLog("WARN", "documents/search not available, falling back to conclusions/query");
+          try {
+            const fallback = await honchoFetch(`/workspaces/${HONCHO_WORKSPACE}/conclusions/query`, {
+              method: "POST", 
+              body: JSON.stringify({ 
+                query: params.query, 
+                top_k: params.limit,
+                observer: params.observer || HONCHO_PEER_ID,
+                observed: params.observed || HONCHO_USER,
+                distance: params.distance ?? 0.7
+              })
+            });
+            const docs = fallback || [];
+            const summary = docs.map((d: any, idx: number) => {
+              const score = typeof d.distance === 'number' ? (1 - d.distance).toFixed(2) : 'N/A';
+              return `${idx + 1}. [Score: ${score}] (${d.id}): ${d.content?.substring(0, 80)?.replace(/\s+/g, ' ') || 'No content'}...`;
+            }).join("\n\n");
+            return { content: [{ type: "text", text: `Search complete (semantic only). Found ${docs.length} documents:\n\n${summary}` }] };
+          } catch (fallbackErr: any) {
+            return { content: [{ type: "text", text: `Search API error: ${fallbackErr.message}` }] };
+          }
+        }
+        return { content: [{ type: "text", text: `Error: ${e.message}` }] };
       }
     }
   });

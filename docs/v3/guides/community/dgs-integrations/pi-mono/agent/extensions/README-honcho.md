@@ -1,80 +1,55 @@
-# Honcho Extension for pi-mono - README 
+# Honcho Extension for pi-mono
 
-
-## Enhancements to Honcho
-
-- A pi-mono extension that captures the **complete ReAct cycle** for maximum Dreamer + Dialectic intelligence, with **intelligent content chunking** for large messages and documents. 
-- **Now enhanced with observational-memory hooks** for Pi session compaction/tree summarization, storing prioritized observations in Honcho for Dreaming.
-- **/honcho-apply-learnings** applies Synthesis Dreams to enhance appropriate agents.
-- **New Features**: pi-mono Observational-memory duplication (compaction/tree hooks), Git branch integration, local fallback for API issues
-- **Hybrid Context Search**: Vector Search + FTS + TriGram + Reranking
-  - This improves search as ollama embedding can't produce embedding for some contexts, yet data can still be found via FTS and Trigram then re-ranking filters memories to only those memories that are appropriate for the current context.
+A pi-mono extension that captures the **complete ReAct cycle** (prompts, thoughts, tool calls, observations, responses) for Dreamer + Dialectic intelligence. Features **intelligent content chunking** for large messages and **observational-memory hooks** for session compaction and tree summarization.
 
 ## Quick Reference
 
-- **Extension File**: `~/.pi/agent/extensions/honcho.ts`
-- **Configuration**: `~/.env`
-- **Services**: `honcho-api.service`, `honcho-deriver.service`
-- **API URL**: http://localhost:8000
+| Item | Value |
+|------|-------|
+| Extension File | `~/.pi/agent/extensions/honcho.ts` |
+| Configuration | `~/.env` or `~/.pi/honcho.json` |
+| API Base URL | `http://localhost:8300` (default) |
+| API Version | `/v3` |
 
----
-
-## Architecture & Program Flow
-
-### System Architecture (Updated with Obs Hooks)
+## Architecture
 
 ```mermaid
 graph TB
-    subgraph piMono ["pi-mono Environment"]
+    subgraph pi["Pi Agent Core"]
         USER["User Input"]
-        PI["Pi Agent Core"]
-        EXT["Honcho Extension"]
+        AGENT["Agent Reasoning"]
+        TOOLS["Tool Execution"]
     end
-    
-    subgraph extInternals ["Extension Internals"]
-        EVT["Event Handlers + Obs Hooks"]
+
+    subgraph ext["Honcho Extension"]
+        HOOKS["Event Hooks (11 total)"]
         QUEUE["Message Queue"]
-        CHUNK["Intelligent Chunker"]
-        BATCH["Batch Sizer"]
+        CHUNK["Content Chunker"]
+        BATCH["Batch Processor"]
         FLUSH["Async Flusher"]
-        OBS["Obs Overlay Local Cache"]
-        REFLECT["Reflection Pruning"]
     end
-    
-    subgraph honchoServ ["Honcho Services"]
-        API["Honcho API Port 8000"]
-        DERIVER["Deriver Worker Vector Search"]
-        DB["PostgreSQL + pgvector Pure Vector No Hybrid"]
+
+    subgraph honcho["Honcho Services"]
+        API["API :8300/v3"]
+        DB[(PostgreSQL + pgvector)]
     end
-    
-    subgraph memLayers ["Memory Layers"]
-        RAW["Raw Messages"]
-        OBS_HONCHO["Observations Explicit Deductive Inductive"]
-        DERIVED["Derived Insights Dreamer Synthesis"]
-    end
-    
-    USER --> PI
-    PI --> EXT
-    EXT --> EVT
-    EVT --> QUEUE
+
+    USER -->|before_agent_start| HOOKS
+    AGENT -->|context| HOOKS
+    TOOLS -->|tool_call/tool_result| HOOKS
+    HOOKS --> QUEUE
     QUEUE --> CHUNK
     CHUNK --> BATCH
     BATCH --> FLUSH
-    FLUSH -.-> API
+    FLUSH -->|POST /messages| API
     API --> DB
-    DB --> RAW
-    DB --> OBS_HONCHO
-    DERIVER --> OBS_HONCHO
-    DERIVER --> DERIVED
-    
-    PI -.-> EXT
-    PI -.-> EXT
-    EVT --> OBS
-    OBS --> REFLECT
-    REFLECT --> QUEUE
+
+    style pi fill:#e3f2fd
+    style ext fill:#c8e6c9
+    style honcho fill:#ffccbc
 ```
 
-### Event-Driven Data Flow (Updated with Hooks)
+## Event Flow
 
 ```mermaid
 sequenceDiagram
@@ -83,161 +58,329 @@ sequenceDiagram
     participant Pi as Pi Core
     participant Ext as Honcho Extension
     participant Queue as Message Queue
-    participant Chunker as Content Chunker
     participant API as Honcho API
     participant DB as PostgreSQL
 
-    User->>Pi: Submit prompt / edit file
-    Pi->>Ext: before_agent_start + tool events
+    User->>Pi: Submit prompt
+    Pi->>Ext: session_start
     activate Ext
-    Ext->>Queue: Queue ReAct trace
-    Ext->>Ext: Background flush
+    Ext->>Ext: Auto-detect workspace
+    Ext->>Queue: Initialize queue
     deactivate Ext
-    
-    Note over Pi: Session grows (e.g., 35K tokens)
-    
-    Pi->>Ext: session_before_compact (threshold hit)
+
+    Pi->>Ext: before_agent_start
     activate Ext
-    Ext->>Queue: Queue 'obs_extraction'
-    Ext->>Ext: Local reflect (prune obs)
-    Ext->>API: Store summary (inductive)
-    API->>DB: Vector embed + index
-    Ext->>DB: Retrieve insights (search)
-    Ext-->>Pi: Return enriched summary (sections + file tags)
+    Ext->>Queue: Queue user prompt
+    Ext->>Queue: Model metadata
+    Ext->>Ext: Async flush
     deactivate Ext
-    
-    Note over DB: Dreaming triggers (inactivity)
-    
-    User->>Pi: Fork branch (e.g., test in dgs-dev)
-    Pi->>Ext: session_before_tree (merge)
+
+    Pi->>Ext: turn_start
     activate Ext
-    Ext->>Ext: Run 'git branch --show-current' (dgs-dev)
-    Ext->>Queue: Queue 'obs_tree' with Git metadata
-    Ext->>Ext: Reflect branch obs
-    Ext->>API: Store branch summary
-    API->>DB: Embed with {git_branch: 'dgs-dev'}
-    Ext-->>Pi: Return tree summary (Git-aware)
+    Ext->>Queue: Turn index metadata
     deactivate Ext
-    
-    Ext->>User: /honcho-obs-branch shows \"Local Branches: - dgs-dev: ## Obs...\"
+
+    Pi->>Ext: context (assistant reasoning)
+    activate Ext
+    Ext->>Queue: Thought/planning content
+    deactivate Ext
+
+    Pi->>Ext: tool_call
+    activate Ext
+    Ext->>Queue: Tool name + inputs
+    deactivate Ext
+
+    Pi->>Ext: tool_result
+    activate Ext
+    Ext->>Queue: Tool output + status
+    deactivate Ext
+
+    Pi->>Ext: turn_end
+    activate Ext
+    Ext->>Queue: Final response
+    Ext->>Ext: Flush queue
+    Ext->>API: POST /sessions/{id}/messages
+    deactivate Ext
+    API->>DB: Store + embed
 ```
 
-### New: Observational-Memory Hooks Integration
+## Available Tools
 
-The extension now duplicates Pi's observational-memory extension by overriding session compaction and tree summarization, injecting into Pi's agent context at key lifecycle points.
+| Tool | Description | Endpoint |
+|------|-------------|----------|
+| `honcho_store` | Store a message in Honcho | `POST /sessions/{id}/messages` |
+| `honcho_chat` | Query Dialectic API | `POST /peers/{id}/chat` |
+| `honcho_list_documents` | List conclusions (observer/observed filters) | `POST /conclusions/list` |
+| `honcho_search_documents` | Search conclusions; hybrid search with fallback | `POST /documents/search` → fallback `POST /conclusions/query` |
 
-#### Hook Flow Diagram
+## Event Hooks
+
+The extension registers 11 hooks to capture the full agent lifecycle:
+
+### Lifecycle Hooks
+
+| Hook | When Triggered | What It Captures |
+|------|----------------|------------------|
+| `session_start` | Pi session begins | Workspace auto-detection |
+| `before_agent_start` | Agent starts | User prompt, model info |
+| `turn_start` | New turn begins | Turn index |
+| `context` | Assistant messages | Thoughts/reasoning |
+| `tool_call` | Tool invoked | Tool name, inputs |
+| `tool_result` | Tool completes | Output, status, errors |
+| `turn_end` | Turn completes | Final response |
+| `agent_end` | Agent finishes | Cleanup flush |
+| `session_shutdown` | Session ends | Final cleanup |
+
+### Observational Memory Hooks
+
+| Hook | When Triggered | Purpose |
+|------|----------------|---------|
+| `session_before_compact` | Token threshold hit (~30K) | Compaction with Honcho insights |
+| `session_before_tree` | Branch merge | Tree summarization |
+
+## Memory Cycle
+
+The extension implements observational memory as a two-part loop:
+
+**Proactive hooks (automatic push/extract)** — triggered by Pi lifecycle events (`session_before_compact` on token overflow, `session_before_tree` on branch merge). Conversation text is extracted, reflected/pruned via `reflectObservations()` (dedupe by normalized key, per-mode limits), queued and stored in Honcho (messages for explicit observations, documents for inductive summaries), then enriched by querying Honcho for insights before returning the summary to Pi. This keeps sessions lean and builds the store that Dreaming synthesizes. If the API returns 404, reflection falls back to local processing.
+
+**Reactive pulls (agent-initiated queries)** — during reasoning, the agent queries Honcho on demand: `honcho_chat` (Dialectic) for natural-language recall, `honcho_search_documents` for scored document retrieval, or `/honcho-status` / `honcho-flush` for queue state. Results are returned as text into the agent turn, supplementing hooks with targeted retrieval.
+
+Hooks build the store; pulls retrieve from it. Hooks run pre-agent (Pi level), pulls run mid-turn (tool level) — no overlap.
+
+## Data Flow
+
+### Message Queue → Honcho
+
+```
+Hook Event
+    ↓
+queueMessage(content, peer_id, metadata)
+    ↓
+Message Queue (in-memory)
+    ↓
+flushMessages() → Async batch send
+    ↓
+POST /v3/workspaces/{ws}/sessions/{id}/messages
+    ↓
+Honcho processes → PostgreSQL + embedding
+```
+
+### Chunking Strategy
+
+Content >4000 chars is intelligently chunked:
+
+1. **Paragraph boundaries** preferred (split on `\n\n`)
+2. **Sentence boundaries** for oversized paragraphs
+3. **Fixed length** as final fallback
+4. **Metadata tracking**: `is_chunk`, `chunk_index`, `total_chunks`
+
+### Batch Processing
+
+- **Max batch size**: 5 messages per request
+- **Inter-batch delay**: 50ms to avoid overwhelming server
+- **Retry logic**: Failed messages requeued to messageQueue
+- **Logging**: File logging to `/tmp/honcho.log` (with buffer)
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HONCHO_BASE_URL` | `http://localhost:8300` | API base URL |
+| `HONCHO_USER` | `dsidlo` | User peer ID |
+| `HONCHO_AGENT_ID` | `agent-pi-mono` | Agent peer ID |
+| `HONCHO_WORKSPACE_MODE` | `auto` | `auto` (detect from Git) or `static` |
+| `HONCHO_WORKSPACE` | `default` | Workspace name (used if mode=static) |
+
+### Configuration File
+
+Searches for `honcho.json` in order:
+1. `./honcho.json` (current directory)
+2. `~/.pi/honcho.json`
+3. `~/.config/pi/honcho.json`
+4. `~/.honcho.json`
+
+Example:
+```json
+{
+  "honcho": {
+    "base_url": "http://localhost:8300",
+    "user": "dsidlo",
+    "agent_id": "agent-pi-mono",
+    "workspace_mode": "auto",
+    "workspace": "local-honcho"
+  }
+}
+```
+
+## Workspace Auto-Detection
+
+When `HONCHO_WORKSPACE_MODE=auto`:
+
+1. Detect Git repository from current working directory
+2. Extract remote origin URL
+3. Generate workspace name: `{dir-name}-{repo-name}`
+4. Create workspace if it doesn't exist
+5. Fallback to current directory name if no Git repo found
+
+## Session Compaction Hook
+
+### Trigger
+When session exceeds ~30K tokens, Pi calls `session_before_compact`.
+
+### Flow
 
 ```mermaid
-graph TD
-    A["Pi Session Start"] --> B["User Prompt / Agent Turn"]
-    B --> C{"Token Threshold Hit? <br>(30K raw tail)"}
-    C -->|Yes| D["session_before_compact Hook"]
-    C -->|No| E["Continue Normal Flow"]
-    D --> F["Queue Messages as 'obs_extraction'"]
-    F --> G["Local Reflection <br>(Dedupe/Prune: 🔴96/🟡40/🟢16)"]
-    G --> H["Store in Honcho <br>(Explicit → Inductive)"]
-    H --> I["Retrieve Synthesized Insights <br>(Vector Search)"]
-    I --> J["Build Summary <br>(Sections + File Tags)"]
-    J --> K["Cache in observationOverlay"]
-    K --> L["Return CompactionResult to Pi"]
-    L --> M["Session Continues <br>(Lean Context)"]
-    E --> M
-
-    subgraph "Background"
-        H -.-> N["Dreaming Triggers <br>(Inactivity)"]
-        N --> O["Synthesis: <br>Patterns/Insights"]
-    end
-
-    B --> P{"Branch Merge? <br>(session_before_tree)"}
-    P -->|Yes| Q["Detect Git Branch <br>(git branch --show-current: dgs-dev)"]
-    Q --> R["Generate branch_id <br>(branch-dgs-dev-123)"]
-    R --> S["Extract/Reflect Branch Obs"]
-    S --> T["Store with Git Metadata <br>({git_branch: 'dgs-dev'})"]
-    T --> U["Cache Locally"]
-    U --> V["Enrich with Similar Branches <br>(Local Fallback)"]
-    V --> W["Return Tree Summary to Pi"]
-    P -->|No| M
+graph TB
+    A[Pi Session] -->|Token threshold| B[session_before_compact]
+    B --> C[Queue messages as 'obs_extraction']
+    C --> D[Flush to Honcho]
+    D --> E[Query conclusions for insights]
+    E -->|POST /conclusions/query| F[Honcho returns synthesis]
+    F --> G[Build structured summary]
+    G --> H[Return to Pi]
+    H --> I[Session continues with lean context]
 ```
 
-#### Detailed Hooks
-- **session_before_compact**: Triggers on token overflow (e.g., 30K raw tail). Queues messages, reflects (priority-based prune), stores in Honcho, retrieves for enriched summary (Observations bullets, Open Threads, Next Action Bias + <read-files>/<modified-files> tags). Falls back to local if API 404.
-- **session_before_tree**: On branch merge, detects Git branch (e.g., 'dgs-dev'), generates ID with Git info, extracts/reflects obs, stores structured (metadata: {git_branch: 'dgs-dev', purpose: 'merge-summary'}), caches. Enriches with similar branches (search or local).
-- **Reflection**: Key-based dedupe (normalize body), limits (red 96, yellow 40, green 16; forced reduces), fallback local.
-- **Storage**: Messages for explicit obs, documents for inductive summaries (triggers Dreaming, e.g., "dgs-dev merge patterns").
-- **Local Cache**: `observationOverlay` (push summaries), scanned by commands.
-- **Commands**: `/honcho-obs-status` (stats + raw tail), `/honcho-obs-reflect` (prune), `/honcho-obs-branch` (local Git/Pi list, shows 'dgs-dev' if detected).
+### Summary Format
 
-#### Observational-Memory: Hooks vs. Context Pulls
-The Honcho extension implements observational-memory in two phases: **proactive hooks** (automatic extraction/storage during Pi events) and **reactive pulls** (agent-initiated queries for context). This creates a memory cycle where hooks build the store, and pulls inject it into agent reasoning.
+Returns Pi compaction with sections:
 
-**Proactive Hooks (Automatic Push/Extract)**:
-- Trigger: Pi lifecycle events (`session_before_compact` on token overflow ~30K, `session_before_tree` on branch merge).
-- Flow: Extract conv text → Reflect/prune (dedupe by key, limit red 96/yellow 40/green 16) → Queue/store in Honcho (messages/docs with metadata) → Retrieve enrichments (search for insights) → Cache locally (`observationOverlay`) → Return summary to Pi.
-- Direction: Pi → Honcho (store) ↔ Honcho → Pi (enriched compact/tree summary with bullets/threads/bias + file tags).
-- Purpose: Keeps Pi sessions lean (prevents token bloat); proactively builds Honcho for Dreaming (background synthesis).
-- No Agent Call Needed: Runs server-side; agent sees results in context.
-- Fallback: Local cache on API 404.
+```markdown
+## Observations
+- [Insights from Honcho]
 
-**Reactive Pulls (On-Demand Context Injection)**:
-- Trigger: Agent tools/commands (e.g., `honcho_chat(query="past patterns")` during reasoning).
-- Flow: Query Honcho API (e.g., `/documents/search` for semantic, `/chat` for Dialectic) or local cache → Format results (scored content, messages) → Inject as text into agent response/prompt.
-- Direction: Agent → Honcho/Local → Agent (added context for decisions).
-- Purpose: Allows agents to recall/use memory reactively (e.g., search branch patterns, get insights); supplements hooks with targeted retrieval.
-- Examples:
-  - `honcho_search_documents`: Pulls docs (limit 5, cosine score) for RAG.
-  - `honcho_chat`: Dialectic query (reasoning level low/medium) for natural recall.
-  - `/honcho-obs-branch`: Local pull (Git + cache) for branch status.
-- Fallback: Local cache/Git for commands; error messages for API fails.
+## Open Threads
+- Recent files/messages
 
-**How They Complement Each Other**:
-- Cycle: Hooks push data proactively (build store during compact/merge); pulls retrieve reactively (use store in agent turns).
-- Efficiency: Hooks compact Pi (hardcoded 30K trigger); pulls add ~1K-2K tokens of relevant memory without overload.
-- No Conflicts: Hooks at Pi level (pre-agent); pulls at tool level (during agent).
-- Customization: Hardcoded in honcho.ts (e.g., thresholds); edit for changes—no settings.json tie-in.
+## Next Action Bias
+1. Actions to prioritize
 
-Example (dgs-dev Merge):
-1. Pi forks for test.
-2. Edit files in dgs-dev.
-3. Merge: Hook detects 'dgs-dev', stores "Git Branch: dgs-dev | ## Obs - 🟡 Gap in validation...".
-4. `/honcho-obs-branch`: "- dgs-dev: ## Obs... (1200 chars)".
+<read-files>
+- /path/to/read/file.ts
+</read-files>
 
-Benefits: Token-efficient Pi sessions + Git-aware Honcho memory (Dreaming on branch patterns).
+<modified-files>
+- /path/to/modified/file.ts
+</modified-files>
+```
 
-### Vector Search: Hybrid (New) vs. Pure Vector (Old)
+## Session Tree Hook
 
-Honcho's search defaults to **hybrid search using pgvector + PostgreSQL FTS** (with trigram and reranking), building on the previous pure vector baseline. This enhances retrieval for both semantic and keyword accuracy.
+### Trigger
+When Pi merges session branches.
 
-- **Old (Pure Vector Baseline)**: Relies solely on vector embeddings (e.g., OpenAI text-embedding-ada-002). Uses HNSW index for cosine similarity. Pros: Simple, fast (~10-50ms). Cons: Weaker on exact keywords (assumes semantic covers all).
-  - How: Query embedded → top-k results (limit=5-10). No FTS/trigram/rerank.
-- **New (Hybrid Enhanced)**: Combines vector similarity + full-text search (PostgreSQL FTS) + trigram fuzzy matching + LLM reranking (post-filter top-k). Pros: Robust for exact/partial/semantic matches. Cons: Slower (~200ms), higher compute.
-  - How: Vector ANN → FTS keyword filter → trigram fuzzy → rerank with LLM. Configurable weights (e.g., fts_weight: 0.3).
-  - Benefits: Better precision (e.g., "git branch" matches exactly + semantically); scales with pgvector.
-  - Tradeoffs: More stages; use pure for speed if semantic suffices.
-  - Tools Impact:
-    - `honcho_search_documents`: Defaults hybrid (score 0-1 with rerank); add `hybrid: false` in body for pure.
-    - `honcho_chat`: Uses hybrid for Dialectic (reasoning on filtered hits).
-    - Chunking Essential: Small chunks (8K chars) for accurate embeddings.
-  - Config: In Honcho: `search_mode = 'hybrid'` (default), `pgvector.index_type = 'hnsW'` (cosine), `fts_enabled = true`, `rerank_model = 'gpt-4o-mini'`. Set `hybrid = false` for pure.
+### Flow
 
-Verification: API/logs confirm hybrid as default (rerank/trigram active); pure as legacy option. Test: `honcho_search_documents(query: "git branch", hybrid: false)` for pure vs. default hybrid.
+```mermaid
+graph TB
+    A[Branch Merge] --> B[session_before_tree]
+    B --> C[Detect Git branch]
+    C --> D[Generate branch_id]
+    D --> E[Extract/reflect observations]
+    E --> F[Store in Honcho with Git metadata]
+    F --> G[Cache locally]
+    G --> H[Return enriched tree summary]
+```
 
-Upgrade aligns with synthesis goals (robust recall for patterns/keywords). For pure speed, disable hybrid in queries.
+## Message Types Captured
 
-### Features (Updated)
+| Type | Source | Metadata |
+|------|--------|----------|
+| `prompt` | User input | `role: user`, `has_images`, `intended_model` |
+| `thought` | Assistant reasoning | `type: thought`, `step: planning`, `model` |
+| `tool_call` | Tool invocation | `tool`, `tool_call_id`, `model` |
+| `observation` | Tool result | `tool`, `status`, `is_error`, `output_length` |
+| `final` | Assistant response | `role: assistant`, `turn_index`, `model` |
+| `obs_extraction` | Compaction data | `session_part: compact`, `type: obs_extraction` |
+| `obs_tree` | Branch summary | `type: obs_tree`, `git_branch`, `session_id` |
 
-- **Observational-Memory Hooks**: Duplicates Pi's compaction/tree (see above).
-- **Git Branch Integration**: `session_before_tree` runs `git branch --show-current`, tags summaries (e.g., "Git: dgs-dev").
-- **Local Cache**: `observationOverlay` for fallback (no API needed).
-- **Chunking**: Unchanged (paragraph/sentence, max 8K chars).
-- **Commands**: `/honcho-obs-status` (stats), `/honcho-obs-reflect` (prune), `/honcho-obs-branch` (local Git/Pi list).
+## API Endpoints Used
+
+| Endpoint | Method | Used By |
+|----------|--------|---------|
+| `/v3/workspaces` | POST | `ensureWorkspaceExists()` |
+| `/v3/workspaces/{ws}/sessions` | POST | `getOrCreateSession()` |
+| `/v3/workspaces/{ws}/sessions/{id}/messages` | POST | `flushMessages()` |
+| `/v3/workspaces/{ws}/peers/{id}/chat` | POST | `honcho_chat` tool |
+| `/v3/workspaces/{ws}/conclusions/list` | POST | `honcho_list_documents` tool |
+| `/v3/workspaces/{ws}/documents/search` | POST | `honcho_search_documents` tool (hybrid) |
+| `/v3/workspaces/{ws}/conclusions/query` | POST | `honcho_search_documents` fallback, compaction hook, tree hook |
+
+## Key Functions
+
+### Logging
+- `honchoLog(level, msg, data?)` - Buffered file logging to `/tmp/honcho.log`
+- `flushHonchoLog()` - Async log file flush
+
+### Configuration
+- `loadConfigFile()` - Load honcho.json configuration
+- `getBaseUrl()` - Resolve API URL from env/config
+- `detectWorkspaceFromContext(ctx)` - Git-based workspace detection
+
+### Session Management
+- `getOrCreateSession()` - Create or reuse session per workspace
+- `ensureWorkspaceExists(name)` - Create workspace if missing
+- `honchoFetch(path, options)` - JSON API client with error handling
+
+### Message Pipeline
+- `queueMessage(content, peer_id, metadata?)` - Add to message queue
+- `splitContentIntoChunks(content, maxSize)` - Intelligent chunking
+- `prepareMessageBatches(messages)` - Batch + chunk preparation
+- `flushMessages()` - Send queued messages to Honcho
+
+### Compaction Helpers
+- `reflectObservations(content, mode)` - Deduplication/pruning
+- `formatFileOperations(read, modified)` - Generate XML tags
+
+## Error Handling
+
+| Error Type | Behavior |
+|------------|----------|
+| API 404 | Log warning, use local cache |
+| Network failure | Requeue messages for retry |
+| Session creation fails | Skip flush, log error |
+| Workspace creation fails | Fallback to `default` |
+
+## Debugging
+
+View logs:
+```bash
+tail -f /tmp/honcho.log
+```
+
+Log format:
+```
+[2024-04-11T04:16:51] [DEBUG] queueMessage | data={"peer_id":"agent-pi-mono","type":"prompt","queueLength":1}
+[2024-04-11T04:16:51] [INFO] flushMessages: complete | data={"successCount":3,"failCount":0,"requeued":0}
+```
+
+## Extension Unload/Reload
+
+On extension reload or pi shutdown:
+
+1. `session_shutdown` hook triggered
+2. Final `flushMessages()` attempt
+3. Process stdin closed
+4. Extension cleanup (pending requests cleared)
+
+## Limitations
+
+- **Document upload**: Not implemented (use conclusions via `honcho_store` instead)
+- **Hybrid search**: Using pure vector search (no FTS integration)
+- **MCP tools**: Not exposed through this extension
+- **Webhooks**: Not currently used
+
+## Related Files
+
+| File | Purpose |
+|------|---------|
+| `honcho.ts` | Main extension (763 lines) |
+| `README-honcho.md` | This documentation |
+| `simpa.ts` | Prompt refinement extension (optional) |
 
 ---
 
-## Troubleshooting (Updated)
-
-- **404 on Commands/Tools**: Local fallback active (no crash). Fix: Start Honcho (`honcho start`), verify `curl http://localhost:8000/`.
-- **No Branch Data**: Run Pi branch merge (not Git checkout)—populates cache. Command shows Git context if empty.
-- **Vector Search**: Hybrid default—test with `honcho_search_documents(query: "validation gap")` (semantic + keywords).
-
-For full file, see `~/.pi/agent/extensions/honcho.ts`. References unchanged. 
+Last updated: 2026-04-11 (matches honcho.ts version)

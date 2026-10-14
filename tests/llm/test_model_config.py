@@ -530,6 +530,56 @@ def test_explicit_thinking_effort_survives_transport_override(
     assert settings.MODEL_CONFIG.thinking_budget_tokens is None
 
 
+def test_env_structured_output_mode_parses_on_openai_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DERIVER_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE=json_object parses into
+    ConfiguredModelSettings.structured_output_mode on the openai transport.
+
+    Loose OpenAI-compatible providers (e.g. Ollama Cloud) ignore json_schema
+    response formats; operators set json_object so the backend requests
+    {"type": "json_object"} and injects the schema into the prompt instead.
+    """
+    from src.config import DeriverSettings
+
+    _clear_deriver_env(monkeypatch)
+    monkeypatch.setenv("DERIVER_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE", "json_object")
+
+    settings = DeriverSettings()
+    assert settings.MODEL_CONFIG.structured_output_mode == "json_object"
+    assert settings.MODEL_CONFIG.transport == "openai"  # default; mode honored
+
+
+def test_env_structured_output_mode_parses_for_summary_and_dream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SUMMARY and DREAM_*_MODEL_CONFIG nested env keys parse the same way."""
+    from src.config import DreamSettings, SummarySettings
+
+    monkeypatch.setenv("SUMMARY_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE", "json_object")
+    monkeypatch.setenv(
+        "DREAM_DEDUCTION_MODEL_CONFIG__STRUCTURED_OUTPUT_MODE", "json_object"
+    )
+    summary = SummarySettings()
+    dream = DreamSettings()
+    assert summary.MODEL_CONFIG.structured_output_mode == "json_object"
+    assert dream.DEDUCTION_MODEL_CONFIG.structured_output_mode == "json_object"
+
+
+def test_env_structured_output_mode_rejected_on_non_openai_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A json_object mode set on a gemini-config model must fail at startup."""
+    from src.config import ConfiguredModelSettings
+
+    with pytest.raises(ValueError, match="structured_output_mode is only supported"):
+        ConfiguredModelSettings(
+            transport="gemini",
+            model="gemini-2.5-flash-lite",
+            structured_output_mode="json_object",
+        )
+
+
 def test_dialectic_level_transport_override_drops_default_thinking_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

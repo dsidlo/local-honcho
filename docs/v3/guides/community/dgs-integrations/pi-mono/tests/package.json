@@ -1,0 +1,9 @@
+{
+  "name": "pi-mono-agent-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test tests/",
+    "test:coverage": "bun test --coverage tests/"
+  }
+}
