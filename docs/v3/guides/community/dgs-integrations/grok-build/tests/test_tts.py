@@ -606,7 +606,7 @@ class SpeakTests(TempTTS):
         paths.log_path().write_text("", encoding="utf-8")
         speak.speak("hello", {"engine": "piper", "piper": {"voice": "alice"}})
         self.assertIn(
-            "speak piper queued chars=5", paths.log_path().read_text(encoding="utf-8")
+            "speak piper queued chars=6", paths.log_path().read_text(encoding="utf-8")
         )
         self.popen.assert_called_once()
 
@@ -1494,8 +1494,8 @@ class PiperTests(TempTTS):
 
         with mock.patch("tts.piper.tempfile.NamedTemporaryFile", side_effect=spy):
             self._run_main(["piper", "--voice", "jenny", "--no-play", "hello"])
-        self.assertEqual(len(names), 1)
-        self.assertFalse(Path(names[0]).exists())
+        self.assertGreaterEqual(len(names), 1)
+        self.assertFalse(any(Path(name).exists() for name in names))
 
         names.clear()
         self.which.side_effect = lambda name: f"/usr/bin/{name}"
@@ -2876,6 +2876,106 @@ class DaemonTests(TempTTS):
             runpy.run_module("tts.daemon", run_name="__main__")
         self.assertEqual(caught.exception.code, 1)
         self.assertIn("Unknown: bogus", stdout.getvalue())
+class PiperSplitTest(unittest.TestCase):
+    """split_text keeps chunks short enough that VITS cannot collapse."""
+
+    def test_short_text_is_one_chunk(self):
+        text = "The deploy finished quickly."
+        self.assertEqual(piper.split_text(text), [text])
+
+    def test_empty_text(self):
+        self.assertEqual(piper.split_text(""), [""])
+        self.assertEqual(piper.split_text("   "), [""])
+
+    def test_sentences_merge_within_cap(self):
+        # One chunk per clause: chunks are never merged across clause
+        # boundaries (that is exactly where the decoder collapses).
+        chunks = piper.split_text("First sentence. Second one follows. Third!")
+        self.assertEqual(chunks, ["First sentence.", "Second one follows.", "Third!"])
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), piper.MAX_CHUNK_CHARS)
+
+    def test_long_comma_train_splits(self):
+        # Runtime-shaped: one terminator-free comma train well past the cap.
+        text = (
+            "Round-8 verdict, Check, Result, Full suite plain no flags, "
+            "47 slash 47, exit 0, ~12 seconds wall, test slash tools dot "
+            "test dot mjs, held the leak, 12 slash 12, exits on its own, "
+            "test slash bridge dot test dot mjs, 7 slash 7, exits 0,"
+        )
+        self.assertGreater(len(text), piper.MAX_CHUNK_CHARS)
+        chunks = piper.split_text(text)
+        self.assertEqual(" ".join(chunks), text)  # no words lost or added
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), piper.MAX_CHUNK_CHARS)
+        self.assertGreater(len(chunks), 1)
+
+    def test_unbreakable_word_is_emitted_alone(self):
+        word = "x" * (piper.MAX_CHUNK_CHARS + 40)
+        chunks = piper.split_text(f"{word} tail")
+        self.assertEqual(chunks[-1], "tail")
+        self.assertTrue(any(c == word for c in chunks))
+
+    def test_filename_dots_do_not_split(self):
+        # "main.py" has no whitespace after its dot: the clause must stay
+        # whole inside whatever chunk lands it.
+        base = "reduce it to main.py; guard's rule fires"
+        text = " ".join([base] * 5)  # ~200 chars: forces clause-level splits
+        chunks = piper.split_text(text)
+        self.assertEqual(" ".join(chunks), text)
+        for chunk in chunks:
+            if "main.py" in chunk:
+                self.assertIn("main.py;", chunk)
+
+    def test_word_boundary_hard_split(self):
+        text = " ".join("word" for _ in range(80))
+        chunks = piper.split_text(text)
+        self.assertEqual(" ".join(chunks), text)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), piper.MAX_CHUNK_CHARS)
+
+
+class PiperSynthesizeChunkedTest(unittest.TestCase):
+    """synthesize() renders each chunk, gaps between chunks, one wav."""
+
+    def test_multi_chunk_assembly(self):
+        calls = []
+
+        class FakeVoice:
+            def synthesize_wav(self, text, wav, syn_config=None):
+                calls.append(text)
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(22050)
+                wav.writeframes(b"\x01\x00")  # one frame per call
+
+        class FakeLibrary:
+            @staticmethod
+            def load(model):
+                return FakeVoice()
+
+        class FakeConfig:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = str(Path(tmp) / "out.wav")
+            long_text = ("word " * 200).strip()
+            with (
+                mock.patch.object(piper, "_import_piper_library", return_value=(FakeLibrary, FakeConfig)),
+                mock.patch.object(piper, "split_text", return_value=["a", "bb", "ccc"]),
+            ):
+                piper.synthesize(long_text, Path("m.onnx"), 1.0, dest, volume=0.5)
+            with wave.open(dest, "rb") as wav:
+                self.assertEqual(wav.getframerate(), 22050)  # set by first chunk write
+                frames = wav.getnframes()
+                params = wav.getparams()
+        self.assertEqual(calls, ["a", "bb", "ccc"])
+        # 3 spoken frames + 2 gaps of 0.1s at 22050 Hz
+        expected_gap = int(22050 * piper.GAP_SECONDS)
+        self.assertEqual(frames, 3 * 1 + 2 * expected_gap)
+        self.assertEqual(params.nchannels, 1)
+        self.assertEqual(params.sampwidth, 2)
 
 
 if __name__ == "__main__":

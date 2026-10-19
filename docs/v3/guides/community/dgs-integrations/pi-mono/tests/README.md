@@ -5,8 +5,10 @@ Black-box tests for the pi-mono agent Honcho integration layer:
 - `agent/extensions/honcho.ts` — the main extension (hooks, tools, commands, flush pipeline, import-time configuration)
 - `agent/extensions/secret-scrub.ts` — the `/secret-scrub` extension (credential redaction for LLM context)
 - `agent/extensions/honcho-apply-learnings-command.ts` — the `/honcho-apply-learnings` command
+- `agent/extensions/voice-control.ts` — the voice control extension (settings store, TTS engine delegation)`
 - `agent/honcho-apply-learnings/run.sh` — the standalone bash script
 - `agent/honcho-upload-document/upload.ts` — the document upload CLI module
+- `agent/voice-response/scripts/` — TTS scripts: `tts-toggle.py` (per-engine volume/engine/device), `tts-gain.py` (level→gain), `speak.sh` routing
 
 ## Running
 

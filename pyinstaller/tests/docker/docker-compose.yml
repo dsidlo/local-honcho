@@ -1,0 +1,84 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: ankane/pgvector:v0.7.4-pg16
+    environment:
+      POSTGRES_DB: honcho
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: honcho_test_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    networks:
+      - honcho-test-net
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    networks:
+      - honcho-test-net
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    networks:
+      - honcho-test-net
+
+  test-target:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../..:/workspace:ro
+    environment:
+      - DATABASE_URL=postgresql+psycopg://postgres:honcho_test_password@postgres:5432/honcho
+      - HONCHO_BASE_URL=http://localhost:8000
+      - LLM_PROVIDER=vllm
+      - LLM_VLLM_BASE_URL=http://ollama:11434/v1
+      - LLM_EMBEDDING_PROVIDER=ollama
+      - LLM_OLLAMA_EMBEDDING_MODEL=bge-m3
+      - LLM_VLLM_API_KEY=ollama
+    privileged: true
+    networks:
+      - honcho-test-net
+
+volumes:
+  pgdata:
+  redis-data:
+  ollama-models:
+
+networks:
+  honcho-test-net:
+    driver: bridge

@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "lastUpdated": "2026-10-07T05:27:55.555Z",
+  "transcription": {
+    "engine": "parakeet",
+    "model": {
+      "size": "base",
+      "device": "cuda",
+      "computeType": "float16",
+      "beamSize": 5,
+      "bestOf": 5,
+      "temperature": 0,
+      "conditionOnPreviousText": true,
+      "noRepeatNgramSize": 0
+    },
+    "audio": {
+      "micDevice": {
+        "name": "Komplete Audio 2: USB Audio",
+        "index": 11,
+        "hwId": null,
+        "pulseId": null
+      },
+      "sampleRate": 16000,
+      "channels": 1,
+      "format": "int16"
+    },
+    "vad": {
+      "enabled": true,
+      "mode": 2,
+      "pauseSeconds": 5,
+      "frameDurationMs": 30,
+      "timeoutSeconds": 120
+    }
+  },
+  "response": {
+    "voice": {
+      "default": "am_michael",
+      "active": "af_heart",
+      "speed": 1.5,
+      "language": "en"
+    },
+    "audio": {
+      "speakerDevice": {
+        "name": null,
+        "index": null,
+        "hwId": null,
+        "pulseId": null
+      },
+      "sampleRate": 24000,
+      "format": "wav"
+    },
+    "behavior": {
+      "autoSpeak": true,
+      "speakErrors": false,
+      "maxTextLength": 500
+    }
+  },
+  "dialog": {
+    "ui": {
+      "width": 102,
+      "renderThrottleMs": 100,
+      "transDelay": 3,
+      "showAudioMeter": true,
+      "showCountdown": true,
+      "confirmBeforeExecute": false
+    },
+    "shortcuts": {
+      "record": "SPACE",
+      "removeLast": "-",
+      "clearAll": "--",
+      "execute": "ENTER",
+      "cancel": "ESCAPE"
+    }
+  },
+  "daemon": {
+    "whisper": {
+      "autoStart": true,
+      "keepAlive": true,
+      "socketPath": "/tmp/whisper-daemon.sock",
+      "pidPath": "/tmp/whisper-daemon.pid"
+    },
+    "tts": {
+      "autoStart": true,
+      "keepAlive": true,
+      "socketPath": "/tmp/kokoro-tts-daemon.sock",
+      "pidPath": "/tmp/kokoro-tts-daemon.pid"
+    }
+  }
+}

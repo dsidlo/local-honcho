@@ -10,14 +10,35 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 import wave
 from pathlib import Path
 
 PLAYERS = ("paplay", "pw-play", "aplay")
+
+# Piper's VITS decoders degrade on long single phoneme streams: synthesis
+# past roughly one hundred phonemes can collapse into hallucinated or
+# phonetically mushy audio on fragile voice models (verified with whisper
+# round-trips against en_US-ryan-medium: a 159-phoneme sentence rendered
+# as garbage while the same text split at clause boundaries rendered
+# word-perfect; multi-clause calls collapse too, so each chunk is ONE
+# espeak clause; and a 134-char comma-free clause, 163 phonemes, collapsed
+# BOTH as one call and as a 120-char word-split chunk, while every
+# single-clause chunk up to 67 chars in the same session decoded clean).
+# Chunks must stay comfortably below that ceiling.
+MAX_CHUNK_CHARS = 64
+# Silence inserted between synthesized chunks, in seconds.
+GAP_SECONDS = 0.1
+# Clause breaks: whitespace after punctuation — commas included, because
+# espeak treats a comma as a clause and one clause per synthesis call is
+# the empirically stable unit. Filenames like "main.py" have no trailing
+# whitespace, so they stay intact.
+CLAUSE_SPLIT = re.compile(r"(?<=[.!?;:,])\s+")
 
 
 def _env(name: str) -> str:
@@ -130,6 +151,41 @@ def _import_piper_library():
     return module.PiperVoice, module.SynthesisConfig
 
 
+def split_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+    """Split text into one-espeak-clause chunks the decoder renders cleanly.
+
+    Every whitespace after sentence punctuation AND after a comma starts a
+    new chunk (the punctuation stays attached, preserving the prosodic
+    pause before the inter-chunk gap). Chunks are deliberately NOT merged
+    across clause boundaries: multi-clause synthesis calls are where the
+    VITS decoder collapses on fragile voice models. A clause longer than
+    ``max_chars`` (comma-free slab, e.g. code) is hard-split at word
+    boundaries.
+    """
+    text = text.strip()
+    if not text:
+        return [""]
+    pieces: list[str] = []
+    for clause in CLAUSE_SPLIT.split(text):
+        clause = clause.strip()
+        if not clause:
+            continue
+        if len(clause) <= max_chars:
+            pieces.append(clause)
+            continue
+        run = ""
+        for word in clause.split():
+            piece = f"{run} {word}".strip()
+            if len(piece) > max_chars and run:
+                pieces.append(run)
+                run = word
+            else:
+                run = piece
+        if run:
+            pieces.append(run)
+    return pieces
+
+
 def synthesize(
     text: str,
     model: Path,
@@ -139,6 +195,15 @@ def synthesize(
 ) -> None:
     """Write one utterance to ``dest``.
 
+    The text is split at clause boundaries (see :func:`split_text`) and
+    each chunk is synthesized separately, then assembled into one wav with
+    a short gap between chunks. Long single phoneme streams otherwise
+    collapse into gibberish on some voice models.
+
+    Each chunk is rendered to its own temp wav because ``synthesize_wav``
+    sets the WAV format on every call, which the strict ``wave`` module of
+    Python 3.12.4+ rejects for a writer that already has frames.
+
     ``volume`` is Piper's sample multiplier. 0.8 is about twenty percent
     under its full-scale default of 1.0.
     """
@@ -146,8 +211,40 @@ def synthesize(
 
     voice = PiperVoice.load(model)
     config = SynthesisConfig(length_scale=length_scale, volume=volume)
+    chunks = [chunk for chunk in split_text(text) if chunk]
+    shape: tuple[int, int, int] | None = None
+    rendered: list[bytes] = []
+    part_paths: list[str] = []
+    try:
+        for chunk in chunks:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as part:
+                part_path = part.name
+            part_paths.append(part_path)
+            with wave.open(part_path, "wb") as chunk_wav:
+                voice.synthesize_wav(chunk, chunk_wav, syn_config=config)
+            with wave.open(part_path, "rb") as chunk_wav:
+                params = chunk_wav.getparams()
+                pcm = chunk_wav.readframes(params.nframes)
+            chunk_shape = (params.nchannels, params.sampwidth, params.framerate)
+            if shape is None:
+                shape = chunk_shape
+            elif chunk_shape != shape:
+                raise ValueError(f"chunk sample format mismatch: {chunk_shape}")
+            rendered.append(pcm)
+    finally:
+        for part_path in part_paths:
+            Path(part_path).unlink(missing_ok=True)
+    if not rendered:
+        return
+    gap = b"\x00\x00" * int(shape[2] * GAP_SECONDS)
     with wave.open(dest, "wb") as wav:
-        voice.synthesize_wav(text, wav, syn_config=config)
+        wav.setnchannels(shape[0])
+        wav.setsampwidth(shape[1])
+        wav.setframerate(shape[2])
+        for index, pcm in enumerate(rendered):
+            if index:
+                wav.writeframes(gap)
+            wav.writeframes(pcm)
 
 
 def play(path: str) -> None:
@@ -205,6 +302,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        log(f"piper error {exc}")
-        print(f"piper error {exc}", file=sys.stderr)
+        trace = traceback.format_exc(limit=6)
+        log(f"piper error {exc}\n{trace}")
+        print(f"piper error {exc}\n{trace}", file=sys.stderr)
         sys.exit(1)

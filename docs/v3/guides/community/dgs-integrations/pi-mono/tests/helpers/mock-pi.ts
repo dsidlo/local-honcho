@@ -14,7 +14,15 @@ export interface MockPi {
   tools: Map<string, any>;
   commands: Map<string, { description: string; handler: (args: string, ctx: any) => Promise<any> }>;
   notifications: Notification[];
-  ui: { notify: (message: string, level?: string, timeout?: number) => void };
+  /** Options already queued for sequential ctx.ui.select calls (FIFO). */
+  selectQueue: string[];
+  /** Every ctx.ui.setStatus(key, value) call recorded as [key, value] pairs. */
+  statusCalls: [string, string | undefined][];
+  ui: {
+    notify: (message: string, level?: string, timeout?: number) => void;
+    select: (title: string, options: string[]) => Promise<string | undefined>;
+    setStatus: (key: string, value: string | undefined) => void;
+  };
   makeCtx: (overrides?: Record<string, any>) => any;
   callHook: (name: string, event: any, ctxOverrides?: Record<string, any>) => Promise<any>;
   executeTool: (name: string, params: any) => Promise<any>;
@@ -28,10 +36,19 @@ export function createMockPi(): MockPi & { pi: any } {
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const notifications: Notification[] = [];
+  const selectQueue: string[] = [];
+  const statusCalls: [string, string | undefined][] = [];
 
   const ui = {
     notify(message: string, level?: string, timeout?: number) {
       notifications.push({ message, level, timeout });
+    },
+    async select(_title: string, _options: string[]): Promise<string | undefined> {
+      if (selectQueue.length > 0) return selectQueue.shift();
+      return undefined; // treated as "user cancelled"
+    },
+    setStatus(key: string, value: string | undefined) {
+      statusCalls.push([key, value]);
     },
   };
 
@@ -96,5 +113,5 @@ export function createMockPi(): MockPi & { pi: any } {
     return cmd.handler(args, makeCtx(ctxOverrides));
   };
 
-  return { pi, handlers, tools, commands, notifications, ui, makeCtx, callHook, executeTool, runCommand };
+  return { pi, handlers, tools, commands, notifications, selectQueue, statusCalls, ui, makeCtx, callHook, executeTool, runCommand };
 }

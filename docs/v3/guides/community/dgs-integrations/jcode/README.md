@@ -24,11 +24,41 @@ jcode/
 └── run-coverage.sh          runs everything with a 100% coverage gate
 ```
 
-Not mirrored here: `skills/` (honcho-ask, honcho-brief, honcho-promote),
-`bin/honcho-*` CLI helpers (ask, brief, model-check, failover-watch), and
-systemd units. They live in the production repo and `bin/install.sh` syncs
-them to `~/.jcode/skills` and `~/bin`; this tree mirrors exactly the parts
-that execute inside jcode (MCP server, tailer, hooks).
+Not mirrored here: `skills/` (honcho-ask, honcho-brief, honcho-promote,
+`jsay`, `jlisten`), `bin/honcho-*` CLI helpers (ask, brief, model-check,
+failover-watch), and systemd units. They live in the production repo and
+`bin/install.sh` syncs them to `~/.jcode/skills` and `~/bin`; this tree
+mirrors exactly the parts that execute inside jcode (MCP server, tailer,
+hooks).
+
+## Local Jcode speech/TTS state
+
+This integration tree does not mirror the local `jsay` skill implementation,
+but the current machine state that jcode is wired to use is:
+
+- `jsay` source: `~/workspace/tools/jsay/jsay`
+- Jcode skill doc: `~/.jcode/skills/jsay/SKILL.md`
+- Jcode hook config: `~/.jcode/config.toml` runs both the Honcho capture hook
+  and `~/.jcode/bin/jcode-turn-jsay` at `turn_end`
+- Persistent Jcode-owned TTS prefs now live in `~/.jcode/jsay.env`
+- `~/.jcode/bin/jcode-turn-jsay` sources `~/.jcode/jsay.env` before invoking
+  `jsay`
+- Current persistent defaults in `~/.jcode/jsay.env`:
+  - `JSAY_ENGINE=kokoro`
+  - `JSAY_VOICE=af_heart`
+  - `JSAY_PIPER_VOICE=en_GB-jenny_dioco-medium`
+- Piper backend uses the same scrubber chain as the pi-mono / grok TTS path:
+  `tts_sanitize`, `tts_guard`, `tts_piper_normalize`
+- Playback on this machine currently prefers `aplay` before `paplay`, because
+  `aplay` is the confirmed audible backend here
+
+Important scope note: these persisted settings are automatically applied for
+Jcode-owned announcements that flow through `~/.jcode/bin/jcode-turn-jsay`.
+A plain fresh-shell `jsay` invocation will not inherit `~/.jcode/jsay.env`
+unless that file is sourced separately by the shell or another launcher.
+
+If this docs tree is refreshed into the production repo, keep those local
+settings in sync with the skill doc rather than duplicating stale defaults.
 
 ## Tests
 

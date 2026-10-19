@@ -219,3 +219,18 @@ Not verified yet, because it needs your approval and the live server: an end-to-
 3. **One workspace per session cwd.** A Grok session started in `~/workspace` that edits `honcho/` does not also write to `local-honcho`. Splitting one journal by the cwd inside each tool call was the earlier idea; the path-as-name decision replaced it.
 4. **Dialectic target.** Applied. `honcho_ask` defaults to agent-grok looking at itself, because `(agent-grok, dsidlo)` stayed empty. Pass `target=dsidlo` to ask about the user.
 5. **Install.** Phase 1 and Phase 2 are copies plus a config merge plus a user systemd unit. Nothing runs until you accept a phase.
+
+## Piper text scrubber (voice-response parity)
+
+`speak.py`'s Piper branch now runs the same scrub stack as pi-mono's installed
+voice-response skill: verbatim copies of `tts_sanitize.py` (markdown/emoji/symbol
+noise), `tts_guard.py` (risk-scored rewrites - paths, KEY=VALUE flags, hashes,
+comparisons, hyphen compounds espeak would fuse ("pi-mono" -> "pi mono") - plus
+digest/drop of hostile sentences), and `tts_piper_normalize.py` (currency, titles,
+decades, units, terminal period), applied after the hook's `prepare_text()` and
+before the Piper CLI. The chain never raises; guard decisions append to
+`~/.grok/tts/guard.log` (module-internal env `TTS_GUARD_LOG` binds the path at
+import, so `speak.py` sets it before loading the guard). Empty and near-empty
+results skip playback ("speak piper nothing-to-say"). Kokoro branch unchanged.
+`piper.py` chunks single-clause slabs at 64 chars (163-phoneme calls collapse;
+verified by whisper round-trips). `speak.py --self-test` covers the chain.

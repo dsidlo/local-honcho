@@ -17,6 +17,11 @@ import subprocess
 import sys
 
 from tts import paths
+
+# tts_guard binds its log path at import time, so the runtime state
+# location must be chosen before the scrub modules load.
+os.environ.setdefault("TTS_GUARD_LOG", str(paths.tts_dir() / "guard.log"))
+from tts import tts_guard, tts_piper_normalize, tts_sanitize  # noqa: E402
 from tts.volume import PIPER_DEFAULT as DEFAULT_PIPER_VOLUME
 from tts.volume import level, multiplier
 
@@ -208,11 +213,40 @@ def piper_command(text: str, cfg: dict) -> list[str]:
     ]
 
 
+def scrub_for_piper(text: str) -> str:
+    """Run the pi-mono voice-response scrub chain over Piper-bound text.
+
+    Same modules pi-mono's speak.sh runs before its engines (verbatim
+    copies of tts_sanitize.py, tts_guard.py, tts_piper_normalize.py):
+    sanitize strips symbol noise, guard risk-scores and rewrites
+    engine-hostile fragments (paths, KEY=VALUE flags, hash tokens,
+    hyphen compounds espeak would fuse - "pi-mono" becomes "pi mono")
+    and digests or drops the rest, normalize fixes espeak terminations
+    and units. The chain never raises; guard.log records every decision.
+    """
+
+    chars_in = len(text)
+    text = tts_sanitize.sanitize(text)
+    text, report = tts_guard.guard(text)
+    normalized = tts_piper_normalize.piper_normalize(text)
+    if normalized.strip():
+        text = normalized
+    log(
+        f"scrub piper chars_in={chars_in} chars_out={len(text)} "
+        f"guard_mode={report.get('mode', '?')}"
+    )
+    return text
+
+
 def speak(text: str, cfg: dict) -> None:
     """Start playback in a child process and return."""
     if cfg.get("engine") == "piper":
         if not paths.piper_python().is_file() or not paths.piper_script().is_file():
             log("speak piper missing")
+            return
+        text = scrub_for_piper(text)
+        if len(text.strip()) < 2:
+            log("speak piper nothing-to-say")
             return
         command = piper_command(text, cfg)
         label = f"speak piper queued chars={len(text)}"
@@ -351,6 +385,11 @@ def self_test() -> None:
     assert built[built.index("--length-scale") + 1] == "0.9"
     assert built[built.index("--volume") + 1] == "0.8"
     assert built[-1] == "Hello there."
+    scrubbed = scrub_for_piper("**pi-mono** now! 1f9472f.")
+    assert "pi mono" in scrubbed and "pi-mono" not in scrubbed
+    assert "1f9472f" not in scrubbed
+    assert scrub_for_piper("done at 20C").endswith("degrees Celsius.")
+    assert scrub_for_piper("```code```") == "code omitted."
     kept = load_config()
     assert kept["engine"] in ENGINES
     print("self-test ok")
