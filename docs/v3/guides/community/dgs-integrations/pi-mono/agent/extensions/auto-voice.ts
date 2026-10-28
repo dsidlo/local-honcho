@@ -3,8 +3,26 @@ import { spawn } from "node:child_process";
 
 export default function (pi: ExtensionAPI) {
   const SPEAK_SCRIPT = "~/.pi/agent/skills/voice-response/scripts/speak.sh";
+  const RESOLVE_VOICE_SCRIPT = "~/.pi/agent/skills/voice-response/scripts/resolve-voice.sh";
   
   let lastUserMessage = ""; // Store last user request
+
+  // Resolve the voice + engine for a repo (by cwd) via the per-repo voice map
+  // and the resolve-voice.sh helper. Falls back to the active/default voice and
+  // engine when the repo isn't mapped. Empty strings mean "leave speak.sh to its
+  // own defaults".
+  function resolveRepoVoice(cwd: string | undefined): { voice: string; engine: string } {
+    const none = { voice: "", engine: "" };
+    if (!cwd) return none;
+    const script = RESOLVE_VOICE_SCRIPT.replace("~", process.env.HOME || "~");
+    try {
+      const { execFileSync } = require("node:child_process");
+      const out = execFileSync("bash", [script, cwd], { encoding: "utf8" }).trim().split("\n");
+      return { voice: (out[0] || "").trim(), engine: (out[1] || "").trim() };
+    } catch {
+      return none;
+    }
+  }
   
   // Clip long text at a sentence boundary so the ending never reads mid-word
   // (a hard character cut makes the engine speak a broken word).
@@ -22,16 +40,21 @@ export default function (pi: ExtensionAPI) {
     return space >= floor ? head.slice(0, space) : head;
   }
 
-  function speak(text: string, isThinking: boolean = false) {
+  function speak(text: string, isThinking: boolean = false, cwd?: string) {
     if (!text.trim()) return;
     
     const speakText = clipToSentence(text, 400);
     const prefix = isThinking ? "Thinking: " : "";
     
     const speakScript = SPEAK_SCRIPT.replace("~", process.env.HOME || "~");
+    const resolved = resolveRepoVoice(cwd);
+    const env = { ...process.env };
+    if (resolved.voice) env.voice = resolved.voice;
+    if (resolved.engine) env.GROK_TTS_ENGINE = resolved.engine;
     const child = spawn("bash", [speakScript, prefix + speakText], {
       detached: true,
-      stdio: "ignore"
+      stdio: "ignore",
+      env,
     });
     child.unref();
   }
@@ -55,7 +78,7 @@ export default function (pi: ExtensionAPI) {
   });
   
   // Speak thinking blocks during message updates
-  pi.on("message_update", async (event, _ctx) => {
+  pi.on("message_update", async (event, ctx) => {
     if (!enabled) return;
     
     const message = event.message;
@@ -79,13 +102,13 @@ export default function (pi: ExtensionAPI) {
         .join(" ");
       
       if (thinkingText && thinkingText.length > 10) {
-        speak(thinkingText, true);
+        speak(thinkingText, true, ctx.cwd);
       }
     }
   });
   
   // Auto-speak assistant messages at the end
-  pi.on("message_end", async (event, _ctx) => {
+  pi.on("message_end", async (event, ctx) => {
     if (!enabled) return;
     
     const message = event.message;
@@ -112,7 +135,7 @@ export default function (pi: ExtensionAPI) {
       fullText = text;
     }
     
-    speak(fullText, false);
+    speak(fullText, false, ctx.cwd);
     
     // Clear stored user message
     lastUserMessage = "";

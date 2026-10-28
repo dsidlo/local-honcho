@@ -69,10 +69,44 @@ ENGINE="${ENGINE:-kokoro}"
 PIPER_VOICE="$(json_get piper.voice en_GB-jenny_dioco-medium)"
 PIPER_VOL="$(json_get piper.volume 8)"
 
-VOICE="${2:-${voice:-${CONFIG_VOICE:-af_heart}}}"
+VOICE="${2:-${voice:-${CONFIG_VOICE:-}}}"
 SPEED="${3:-${speed:-${CONFIG_SPEED:-1.5}}}"
 TEXT="${1:-Hello}"
 RAW_CHARS="${#TEXT}"
+
+# Per-repo engine+voice resolution. The repo map is authoritative unless the
+# caller explicitly passed a voice (positional $2 or voice= env) or a
+# GROK_TTS_ENGINE override. resolve-voice.sh returns voice/engine/speed for the
+# cwd, falling back to defaults for unmapped repos.
+RESOLVED_VOICE=""
+RESOLVED_ENGINE=""
+RESOLVED_SPEED=""
+RESOLVER="${VOICE_RESOLVER_SCRIPT:-$SKILL_DIR/scripts/resolve-voice.sh}"
+if [[ -x "$RESOLVER" ]]; then
+  IFS=$'\n' read -r -d '' -a RESOLVED < <("$RESOLVER" "$PWD" && printf '\0')
+  RESOLVED_VOICE="${RESOLVED[0]:-}"
+  RESOLVED_ENGINE="${RESOLVED[1]:-}"
+  RESOLVED_SPEED="${RESOLVED[2]:-}"
+fi
+
+# Voice: explicit caller arg/env wins; otherwise repo-resolved; else config.
+if [[ -n "${2:-}" || -n "${voice:-}" ]]; then
+  VOICE="${2:-${voice:-$VOICE}}"
+else
+  [[ -n "$RESOLVED_VOICE" ]] && VOICE="$RESOLVED_VOICE"
+  [[ -z "$VOICE" ]] && VOICE="$CONFIG_VOICE"
+fi
+# Engine: env override wins; otherwise repo-resolved; else existing.
+if [[ -n "${GROK_TTS_ENGINE:-}" ]]; then
+  ENGINE="$GROK_TTS_ENGINE"
+else
+  [[ -n "$RESOLVED_ENGINE" ]] && ENGINE="$RESOLVED_ENGINE"
+fi
+# Speed: repo-resolved when caller didn't set one explicitly.
+if [[ -z "${speed:-}" && -z "${3:-}" && -n "$RESOLVED_SPEED" ]]; then
+  SPEED="$RESOLVED_SPEED"
+fi
+VOICE="${VOICE:-af_heart}"
 
 # Clean the text before speaking: strip markdown, emoji, URLs and other
 # symbols the engines read aloud awkwardly (shared sanitizer, see
