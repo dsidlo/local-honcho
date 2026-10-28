@@ -82,6 +82,9 @@ function baseEnv(extra: Record<string, string> = {}) {
     GROK_TTS_PIPER_LOG: piperLog,
     // Nonexistent file: no activeVoice bleed from the shipped config.json.
     VOICE_SKILL_CONFIG: join(dir, "skill-config.json"),
+    // Nonexistent per-repo voice map: neutralize resolve-voice.sh per-repo
+    // resolution so tests control engine/voice via GROK_TTS_CONFIG + env.
+    PI_VOICE_REPO_MAP: join(dir, "no-repo-map.json"),
     ...extra,
   };
 }
@@ -189,6 +192,7 @@ describe("speak.sh engine and volume routing", () => {
     const r = spawnProc(
       ["bash", join(SCRIPTS, "speak.sh"), "hello world", "", ""],
       baseEnv({
+        GROK_TTS_ENGINE: "piper",
         GROK_TTS_PIPER_PYTHON: fakePython,
         GROK_TTS_PIPER_SPEAK: join(dir, "piper.py"), // never read; argv only
         PIPER_LOG: piperLog,
@@ -213,6 +217,7 @@ describe("speak.sh engine and volume routing", () => {
     spawnProc(
       ["bash", join(SCRIPTS, "speak.sh"), "hi", "", ""],
       baseEnv({
+        GROK_TTS_ENGINE: "piper",
         GROK_TTS_PIPER_PYTHON: fakePython,
         GROK_TTS_PIPER_SPEAK: join(dir, "piper.py"),
         PIPER_LOG: piperLog,
@@ -252,6 +257,7 @@ describe("speak.sh engine and volume routing", () => {
     spawnProc(
       ["bash", join(SCRIPTS, "speak.sh"), "hi", "af_heart", ""],
       baseEnv({
+        GROK_TTS_ENGINE: "piper",
         GROK_TTS_PIPER_PYTHON: fakePython,
         GROK_TTS_PIPER_SPEAK: join(dir, "piper.py"),
         GROK_TTS_PIPER_VOICES: join(dir, "voices"),
@@ -269,6 +275,7 @@ describe("speak.sh engine and volume routing", () => {
       return spawnProc(
         ["bash", join(SCRIPTS, "speak.sh"), text, voice, ""],
         baseEnv({
+          GROK_TTS_ENGINE: "piper",
           GROK_TTS_PIPER_PYTHON: fakePython,
           GROK_TTS_PIPER_SPEAK: join(dir, "piper.py"),
           GROK_TTS_PIPER_VOICES: join(dir, "voices"),
