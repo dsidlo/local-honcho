@@ -167,7 +167,10 @@ async def process_representation_tasks_batch(
         json_mode=True,
         max_input_tokens=settings.DERIVER.MAX_INPUT_TOKENS,
         enable_retry=True,
-        retry_attempts=3,
+        # Rate-limit quick-retry budget: a 429 rides a few short in-call
+        # retries, then propagates to `queue_manager._handle_processing_error`
+        # where the record is deferred (released for reclaim), not errored.
+        retry_attempts=settings.LLM.RETRY_RATELIMIT_QUICK_RETRIES,
         trace_name="minimal_deriver",
         telemetry=LLMTelemetryContext(
             workspace_name=latest_message.workspace_name,

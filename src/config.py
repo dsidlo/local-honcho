@@ -808,6 +808,27 @@ class LLMSettings(HonchoSettings):
         2000
     )
 
+    # Rate-limit (HTTP 429) handling strategy — see
+    # docs/v3/guides/community/dgs-integrations/Honcho_LLM_RateLimit-Plan.md.
+    # A 429 rides a quick in-call retry then propagates to the caller as the
+    # rate-limit signal; the deriver defers the affected queue record instead
+    # of marking it errored or falling back to a backup model. Setting
+    # RETRY_RATELIMIT_ENABLED=false reproduces the old blanket exponential retry
+    # + fallback behavior.
+    RETRY_RATELIMIT_ENABLED: bool = True
+    # In-call quick retries before signaling (client layer).
+    RETRY_RATELIMIT_QUICK_RETRIES: Annotated[int, Field(default=3, ge=1, le=10)] = 3
+    # Delay between quick retries, in milliseconds.
+    RETRY_RATELIMIT_QUICK_DELAY_MS: Annotated[
+        int, Field(default=1500, ge=0, le=60_000)
+    ] = 1500
+    # Queue-level cooldown (seconds) before re-claiming a deferred record.
+    RETRY_RATELIMIT_COOLDOWN_SEC: Annotated[int, Field(default=60, ge=0, le=3600)] = 60
+    # Cap on consecutive deferrals before the record is surfaced as stuck.
+    RETRY_RATELIMIT_MAX_DEFERRALS: Annotated[int, Field(default=5, ge=1, le=100)] = 5
+    # Emit the active-since metric (deriver_rate_limit_active_seconds).
+    RETRY_RATELIMIT_ACTIVE_SINCE_METRIC: bool = True
+
 
 class EmbeddingSettings(HonchoSettings):
     model_config = SettingsConfigDict(  # pyright: ignore
@@ -940,7 +961,9 @@ class DeriverWRRSettings(BaseModel):
 
     @field_validator("WEIGHTS")
     @classmethod
-    def validate_weights(cls, v: dict[str, float], info: ValidationInfo) -> dict[str, float]:
+    def validate_weights(
+        cls, v: dict[str, float], info: ValidationInfo
+    ) -> dict[str, float]:
         """Validate weights sum to exactly 1.0 (100%).
 
         idle_fill is an explicit task type representing capacity reserved

@@ -76,4 +76,22 @@ def raise_upstream_error(exc: BaseException) -> None:
         raise upstream from exc
 
 
-__all__ = ["as_upstream_error", "raise_upstream_error"]
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """True when `exc` is a provider throttle (HTTP 429).
+
+    Reuses the `_status_of` attribute-probing approach, so each SDK is
+    recognized through what it exposes: anthropic/openai carry `status_code`,
+    google-genai `code`. SDK-native `RateLimitError` types (anthropic, openai)
+    and the `rate_limit_exceeded` surface string are also matched as a
+    fallback for throttles that do not carry a reliable numeric status.
+    """
+    if _status_of(exc) == 429:
+        return True
+    for module in (anthropic, openai):
+        rate_limit_cls = getattr(module, "RateLimitError", None)
+        if rate_limit_cls is not None and isinstance(exc, rate_limit_cls):
+            return True
+    return "rate_limit_exceeded" in str(exc)
+
+
+__all__ = ["as_upstream_error", "raise_upstream_error", "is_rate_limit_error"]

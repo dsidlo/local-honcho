@@ -33,6 +33,10 @@ class ErrorRecord:
     backoff_until: datetime  # cooldown period
     escalate: bool = False  # retries exhausted: mark permanently errored
     attempts: int = 0  # uncapped failure tally, logging only
+    # Stamp of the start of a provider rate-limit (429) condition, set by
+    # `mark_rate_limit`. Preserved across later throttles so operators can see
+    # how long the condition has persisted; cleared by `clear()` on success.
+    rate_limit_since: datetime | None = None
 
 
 class WorkUnitErrorTracker:
@@ -56,10 +60,26 @@ class WorkUnitErrorTracker:
         # longer exists in settings; the tracker here now only serves the
         # standalone test suite and any opt-in re-use.
         retry_cfg = getattr(settings.DERIVER, "RETRY", None)
-        self._max_retries: int = max_retries if max_retries is not None else getattr(retry_cfg, "MAX_RETRIES", 3)
-        self._base_backoff: float = base_backoff if base_backoff is not None else getattr(retry_cfg, "BASE_BACKOFF_SEC", 5.0)
-        self._max_backoff: float = max_backoff if max_backoff is not None else getattr(retry_cfg, "MAX_BACKOFF_SEC", 300.0)
-        self._ttl: float = ttl if ttl is not None else getattr(retry_cfg, "ERROR_TRACKER_TTL_SEC", 3600.0)
+        self._max_retries: int = (
+            max_retries
+            if max_retries is not None
+            else getattr(retry_cfg, "MAX_RETRIES", 3)
+        )
+        self._base_backoff: float = (
+            base_backoff
+            if base_backoff is not None
+            else getattr(retry_cfg, "BASE_BACKOFF_SEC", 5.0)
+        )
+        self._max_backoff: float = (
+            max_backoff
+            if max_backoff is not None
+            else getattr(retry_cfg, "MAX_BACKOFF_SEC", 300.0)
+        )
+        self._ttl: float = (
+            ttl
+            if ttl is not None
+            else getattr(retry_cfg, "ERROR_TRACKER_TTL_SEC", 3600.0)
+        )
 
         self._records: dict[str, ErrorRecord] = {}
         self._lock = threading.Lock()
@@ -129,6 +149,53 @@ class WorkUnitErrorTracker:
         """Remove record on successful processing."""
         with self._lock:
             self._records.pop(work_unit_key, None)
+
+    def mark_rate_limit(self, work_unit_key: str) -> ErrorRecord:
+        """Stamp the start of a provider rate-limit condition for a work unit.
+
+        The first throttle sets ``rate_limit_since``; later throttles preserve
+        the original stamp so operators can see how long the condition has
+        persisted. Returns the updated record.
+        """
+        now = datetime.now(UTC)
+        with self._lock:
+            record = self._records.get(work_unit_key)
+            if record is None:
+                record = ErrorRecord(
+                    first_seen=now,
+                    last_seen=now,
+                    retry_count=0,
+                    last_error="rate_limit",
+                    backoff_until=now,
+                    rate_limit_since=now,
+                )
+                self._records[work_unit_key] = record
+            else:
+                record.rate_limit_since = record.rate_limit_since or now
+                record.last_seen = now
+            return record
+
+    def is_rate_limit_cooldown_active(
+        self, work_unit_key: str, now: datetime | None = None
+    ) -> bool:
+        """True if the work unit is still inside its LLM rate-limit cooldown.
+
+        The claim path uses this to avoid re-claiming a unit that was just
+        deferred on a provider 429: the provider is throttled, and immediately
+        re-claiming would busy-loop against it. A record with a
+        ``rate_limit_since`` stamp is in cooldown until
+        ``settings.LLM.RETRY_RATELIMIT_COOLDOWN_SEC`` elapses from that stamp.
+        """
+        if settings.LLM.RETRY_RATELIMIT_COOLDOWN_SEC <= 0:
+            return False
+        current = now if now is not None else datetime.now(UTC)
+        with self._lock:
+            record = self._records.get(work_unit_key)
+            if record is None or record.rate_limit_since is None:
+                return False
+            return (
+                current - record.rate_limit_since
+            ).total_seconds() < settings.LLM.RETRY_RATELIMIT_COOLDOWN_SEC
 
     def should_escalate(self, work_unit_key: str) -> bool:
         """True if the record's atomic escalation decision is in effect.

@@ -19,10 +19,11 @@ from pydantic import BaseModel
 from sentry_sdk.ai.monitoring import ai_track
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.config import ConfiguredModelSettings, ModelConfig
+from src.config import ConfiguredModelSettings, ModelConfig, settings
 from src.exceptions import ValidationException
 from src.telemetry.reasoning_traces import log_reasoning_trace
 
+from .errors import is_rate_limit_error
 from .executor import honcho_llm_call_inner
 from .runtime import (
     AttemptPlan,
@@ -30,6 +31,7 @@ from .runtime import (
     current_attempt,
     effective_temperature,
     plan_attempt,
+    rate_limit_last_failure,
     resolve_runtime_model_config,
     start_captured_span,
 )
@@ -46,6 +48,28 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 M = TypeVar("M", bound=BaseModel)
+
+# Exponential backoff used for non-rate-limit failures (timeouts, 5xx).
+# Kept identical to the pre-strategy behavior.
+_EXPONENTIAL_WAIT = wait_exponential(multiplier=1, min=4, max=10)
+
+
+def _retry_wait(retry_state: Any) -> float:
+    """Per-failure-class tenacity wait.
+
+    429s (rate limits) use the short fixed quick-retry delay so the worker is
+    never held for minutes on a single throttled call; everything else keeps
+    the existing exponential 4–10s backoff. When the rate-limit strategy is
+    disabled, the old blanket exponential is used for every failure.
+    """
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    if (
+        settings.LLM.RETRY_RATELIMIT_ENABLED
+        and exc is not None
+        and is_rate_limit_error(exc)
+    ):
+        return settings.LLM.RETRY_RATELIMIT_QUICK_DELAY_MS / 1000.0
+    return _EXPONENTIAL_WAIT(retry_state)
 
 
 @overload
@@ -286,16 +310,28 @@ async def honcho_llm_call(
         current_attempt.set(next_attempt)
         exc = retry_state.outcome.exception() if retry_state.outcome else None
         if exc:
-            logger.warning(
-                f"Error on attempt {retry_state.attempt_number}/{retry_attempts} with "
-                + f"{runtime_model_config.transport}/{runtime_model_config.model}: {exc}"
-            )
-            logger.info(f"Will retry with attempt {next_attempt}/{retry_attempts}")
+            if settings.LLM.RETRY_RATELIMIT_ENABLED and is_rate_limit_error(exc):
+                rate_limit_last_failure.set(True)
+                logger.warning(
+                    "Rate-limit on attempt %d/%d with %s/%s; quick-retrying in %.1fs",
+                    retry_state.attempt_number,
+                    retry_attempts,
+                    runtime_model_config.transport,
+                    runtime_model_config.model,
+                    settings.LLM.RETRY_RATELIMIT_QUICK_DELAY_MS / 1000.0,
+                )
+            else:
+                rate_limit_last_failure.set(False)
+                logger.warning(
+                    f"Error on attempt {retry_state.attempt_number}/{retry_attempts} with "
+                    + f"{runtime_model_config.transport}/{runtime_model_config.model}: {exc}"
+                )
+                logger.info(f"Will retry with attempt {next_attempt}/{retry_attempts}")
 
     if enable_retry:
         decorated = retry(
             stop=stop_after_attempt(retry_attempts),
-            wait=wait_exponential(multiplier=1, min=4, max=10),
+            wait=_retry_wait,
             before_sleep=before_retry_callback,
             # Surface the provider's own error once the budget is spent.
             # Without this tenacity raises RetryError, which erases the cause
@@ -412,7 +448,7 @@ async def honcho_llm_call(
             if enable_retry:
                 wrapped = retry(
                     stop=stop_after_attempt(retry_attempts),
-                    wait=wait_exponential(multiplier=1, min=4, max=10),
+                    wait=_retry_wait,
                     before_sleep=before_retry_callback,
                     # Same as above: the toolless path is what the deriver
                     # uses, so an outage here must stay legible too.

@@ -6,6 +6,7 @@ import time
 from asyncio import Task
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from logging import getLogger
 from typing import Any, NamedTuple, cast
 
@@ -36,6 +37,7 @@ from src.deriver.consumer import (
     process_item,
     process_representation_batch,
 )
+from src.deriver.error_tracker import ErrorRecord, WorkUnitErrorTracker
 from src.deriver.wrr_metrics import (
     record_idle_fill,
     record_quota_calculation,
@@ -52,6 +54,7 @@ from src.dreamer.dream_scheduler import (
     get_dream_scheduler,
     set_dream_scheduler,
 )
+from src.llm.errors import is_rate_limit_error
 from src.models import QueueItem
 from src.reconciler import (
     ReconcilerScheduler,
@@ -174,6 +177,11 @@ class QueueManager:
         # Initialize from settings
         self.workers: int = settings.DERIVER.WORKERS
         self.semaphore: asyncio.Semaphore = asyncio.Semaphore(self.workers)
+
+        # In-memory rate-limit tracker (per QueueManager). Records the start of
+        # each work unit's rate-limit (429) condition; cleared on success.
+        # State is intentionally not durable: a restart re-attempts the records.
+        self._rate_limit_tracker: WorkUnitErrorTracker = WorkUnitErrorTracker()
 
         # Get or create the singleton dream scheduler
         existing_scheduler = get_dream_scheduler()
@@ -438,6 +446,28 @@ class QueueManager:
                 await db.commit()
                 return {}
 
+            # A provider rate-limit (429) is tracked in-memory: a unit that was
+            # just deferred on a 429 may still be inside its cooldown. Don't
+            # immediately re-claim it (busy-loop against the throttled
+            # provider); filter those units out before claiming.
+            cooldown_units = [
+                unit
+                for unit in available_units
+                if self._rate_limit_tracker.is_rate_limit_cooldown_active(unit)
+            ]
+            for unit in cooldown_units:
+                logger.info(
+                    "Deferring claim of rate-limited work unit %s (in cooldown)",
+                    unit,
+                )
+            if cooldown_units:
+                available_units = [
+                    unit for unit in available_units if unit not in cooldown_units
+                ]
+            if not available_units:
+                await db.commit()
+                return {}
+
             claimed_mapping = await self.claim_work_units(db, available_units)
             await db.commit()
 
@@ -533,6 +563,28 @@ class QueueManager:
             )
 
             # Claim work units
+            if not all_work_units:
+                await db.commit()
+                return {}
+
+            # Defer any unit still inside its LLM rate-limit cooldown so it
+            # isn't immediately re-claimed against a throttled provider.
+            cooldown_units = [
+                unit
+                for unit in all_work_units
+                if self._rate_limit_tracker.is_rate_limit_cooldown_active(unit)
+            ]
+            for unit in cooldown_units:
+                logger.info(
+                    "Deferring claim of rate-limited work unit %s (in cooldown)",
+                    unit,
+                )
+            if cooldown_units:
+                all_work_units = [
+                    unit
+                    for unit in all_work_units
+                    if unit not in cooldown_units
+                ]
             if not all_work_units:
                 await db.commit()
                 return {}
@@ -713,6 +765,25 @@ class QueueManager:
     # Queue Worker Logic #
     ######################
 
+    async def _mark_rate_limit(self, work_unit_key: str) -> ErrorRecord:
+        """Stamp this work unit as currently rate-limited (429).
+
+        Records the start of the rate-limit condition (preserving an earlier
+        stamp) and, when configured, emits the operator-facing
+        ``deriver_rate_limit_active_seconds`` gauge. State is in-memory and
+        intentionally non-durable: a deriver restart clears it.
+        """
+        record = self._rate_limit_tracker.mark_rate_limit(work_unit_key)
+        if settings.LLM.RETRY_RATELIMIT_ACTIVE_SINCE_METRIC:
+            seconds = 0.0
+            if record.rate_limit_since is not None:
+                seconds = max(
+                    0.0,
+                    (datetime.now(UTC) - record.rate_limit_since).total_seconds(),
+                )
+            prometheus_metrics.set_deriver_rate_limit_active(seconds=seconds)
+        return record
+
     async def _handle_processing_error(
         self,
         error: Exception,
@@ -744,6 +815,41 @@ class QueueManager:
             work_unit_key: The work unit key for the queue items
             context: Context string describing what was being processed (e.g., "processing representation batch")
         """
+        if settings.LLM.RETRY_RATELIMIT_ENABLED and is_rate_limit_error(error):
+            # A throttle is not a failure: leave the record unprocessed and
+            # un-errored, release the work unit, and let the next record drain.
+            # Reuses the shared per-work-unit retry-counter budget.
+            try:
+                record = await self._mark_rate_limit(work_unit_key)
+                since = record.rate_limit_since or datetime.now(UTC)
+                deferrals = await self._get_work_unit_retry_attempts(work_unit_key) + 1
+                await self._set_work_unit_retry_attempts(work_unit_key, deferrals)
+                logger.warning(
+                    "Rate-limit in play for work unit %s (since %s); "
+                    + "deferring (deferral %d/%d)",
+                    work_unit_key,
+                    since,
+                    deferrals,
+                    settings.LLM.RETRY_RATELIMIT_MAX_DEFERRALS,
+                    exc_info=error,
+                )
+                if deferrals >= settings.LLM.RETRY_RATELIMIT_MAX_DEFERRALS:
+                    logger.error(
+                        "Rate-limit persisted for work unit %s beyond %d deferrals "
+                        + "(since %s); leaving item(s) queued for reclaim",
+                        work_unit_key,
+                        settings.LLM.RETRY_RATELIMIT_MAX_DEFERRALS,
+                        since,
+                    )
+                return True
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Rate-limit bookkeeping failed for work unit %s; releasing %s",
+                    work_unit_key,
+                    context,
+                )
+                return True
+
         if is_retryable_error(error):
             try:
                 attempts = await self._get_work_unit_retry_attempts(work_unit_key) + 1

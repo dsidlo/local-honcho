@@ -247,6 +247,14 @@ deriver_queue_oldest_pending_age_seconds_gauge = NamespacedGauge(
     ["namespace"],
 )
 
+deriver_rate_limit_active_seconds_gauge = NamespacedGauge(
+    "deriver_rate_limit_active_seconds",
+    "Seconds the current provider rate-limit (429) condition has persisted for "
+    + "the most recently throttled work unit, 0 when no throttle is active. "
+    + "Per-instance in-memory value; resets on deriver restart",
+    ["namespace"],
+)
+
 dreams_due_gauge = NamespacedGauge(
     "dreams_due",
     "Collections whose next dream is due and would actually run. "
@@ -657,6 +665,13 @@ class PrometheusMetrics:
             deriver_metrics_last_success_timestamp_gauge.labels().set(timestamp)
         except Exception as e:
             self._handle_metric_error("set_deriver_metrics_last_success", e)
+
+    def set_deriver_rate_limit_active(self, *, seconds: float) -> None:
+        """Record how long the current rate-limit (429) condition has persisted."""
+        try:
+            deriver_rate_limit_active_seconds_gauge.labels().set(seconds)
+        except Exception as e:
+            self._handle_metric_error("set_deriver_rate_limit_active", e)
 
 
 prometheus_metrics = PrometheusMetrics()

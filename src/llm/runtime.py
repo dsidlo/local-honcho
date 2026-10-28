@@ -23,6 +23,7 @@ from src.config import (
     ModelConfig,
     ModelTransport,
     resolve_model_config,
+    settings,
 )
 
 from .capture import (
@@ -37,6 +38,15 @@ logger = logging.getLogger(__name__)
 
 # ContextVar tracking the current retry attempt for provider switching.
 current_attempt: ContextVar[int] = ContextVar("current_attempt", default=0)
+
+# ContextVar set when the most recent failed attempt was a provider rate limit
+# (HTTP 429). `select_model_config_for_attempt` consults it to avoid swapping to
+# the backup model on a throttle — a rate limit is temporary, so downgrading
+# would be both wrong and unnecessary. Only meaningful when the rate-limit
+# strategy is enabled (settings.LLM.RETRY_RATELIMIT_ENABLED).
+rate_limit_last_failure: ContextVar[bool] = ContextVar(
+    "rate_limit_last_failure", default=False
+)
 
 
 @dataclass
@@ -123,7 +133,14 @@ def select_model_config_for_attempt(
     Primary config on all attempts except the last, which swaps to the
     resolved fallback (if any).
     """
-    if attempt != retry_attempts or model_config.fallback is None:
+    # A rate-limit on the prior attempt suppresses the fallback swap (when the
+    # strategy is enabled): a throttle is short-lived, so the provider should
+    # be retried rather than downgrading to the backup model.
+    if (
+        attempt != retry_attempts
+        or model_config.fallback is None
+        or (settings.LLM.RETRY_RATELIMIT_ENABLED and rate_limit_last_failure.get())
+    ):
         return model_config
 
     fb = model_config.fallback
@@ -257,6 +274,7 @@ __all__ = [
     "AttemptPlan",
     "CapturedAgentSpan",
     "current_attempt",
+    "rate_limit_last_failure",
     "effective_config_for_call",
     "effective_temperature",
     "plan_attempt",
