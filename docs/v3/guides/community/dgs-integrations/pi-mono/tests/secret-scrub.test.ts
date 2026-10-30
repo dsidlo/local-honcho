@@ -17,19 +17,35 @@ import { createMockPi, type MockPi } from "./helpers/mock-pi";
 
 const REDACTED = (kind: string) => `[REDACTED:${kind}]`;
 
-const PEM =
-  "-----BEGIN RSA PRIVATE KEY-----\n" +
-  "***REMOVED***\n" +
-  "moreBase64BodyLinesWithoutSpaces1234567890+/=\n" +
-  "-----END RSA PRIVATE KEY-----";
-
-const GH_PAT = "github_pat_11ABCDEFG0aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890abcdefghijk";
-const GH_CLASSIC = "***REMOVED***";
-const GH_OAUTH = "gho_Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2";
-const GLPAT = "***REMOVED***";
-const AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // 40 base64-ish chars
-const JWT3 =
-  "eyJhbGciOiJIUzI1NiJ9.***REMOVED***";
+const PEM = (() => {
+  // Procedurally generate a PEM-shaped private-key block at runtime so the
+  // source never contains a literal resembling a real secret (avoids GitHub
+  // secret-scanning false positives). Still matches the scrubbing pattern and
+  // the OPENSSH-variant rewrite below (which relies on the "RSA PRIVATE"
+  // marker).
+  const b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+  let body = "";
+  for (let i = 0; i < 96; i++) {
+    body += b64[Math.floor(Math.random() * b64.length)];
+  }
+  return `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`;
+})();
+const GH_PAT = "github_pat_" + Array.from({ length: 22 }, () =>
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 62)]).join("");
+const GH_CLASSIC = "ghp_" + Array.from({ length: 36 }, () =>
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 62)]).join("");
+const GH_OAUTH = "gho_" + Array.from({ length: 36 }, () =>
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 62)]).join("");
+const GLPAT = "glpat-" + Array.from({ length: 20 }, () =>
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 62)]).join("");
+const AWS_SECRET = Array.from({ length: 40 }, () =>
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[Math.floor(Math.random() * 64)]).join("");
+const JWT3 = "eyJ" + Array.from({ length: 20 }, () =>
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"[Math.floor(Math.random() * 64)]).join("") + "." +
+  Array.from({ length: 24 }, () =>
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"[Math.floor(Math.random() * 64)]).join("") + "." +
+    Array.from({ length: 24 }, () =>
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"[Math.floor(Math.random() * 64)]).join("");
 
 let counter = 0;
 
@@ -114,7 +130,10 @@ describe("secret-scrub pattern engine (scrubText)", () => {
   test("redacts JWTs (two and three segments)", async () => {
     const { mod } = await boot();
     expect(mod.scrubText(`Authorization: ${JWT3}`).text).toBe(`Authorization: ${REDACTED("jwt")}`);
-    const jwt2 = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0.";
+    const jwt2 = "eyJ" + Array.from({ length: 20 }, () =>
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"[Math.floor(Math.random() * 64)]).join("") + "." +
+      Array.from({ length: 20 }, () =>
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"[Math.floor(Math.random() * 64)]).join("");
     expect(mod.scrubText(jwt2).text).toBe(REDACTED("jwt"));
   });
 

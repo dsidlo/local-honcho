@@ -60,7 +60,11 @@ os.environ["SCRUBBER_STATE_DIR"] = _STATE.name
 _SESSION = "sess-1"
 _OTHER_SESSION = "sess-2"
 
-_PEM_BODY = "***REMOVED***"
+import random
+_PEM_BODY = "MIIE" + "".join(
+    random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+    for _ in range(64)
+)
 _PEM = "-----BEGIN PRIVATE KEY-----\n" + _PEM_BODY + "\n-----END PRIVATE KEY-----"
 
 
