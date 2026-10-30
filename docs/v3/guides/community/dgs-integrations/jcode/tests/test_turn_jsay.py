@@ -56,15 +56,10 @@ def run_hook(tmp_path, text, status="ok", event="turn_end", duration_ms="1000"):
         "JCODE_HOOK_LAST_ASSISTANT_TEXT": text,
         "JCODE_HOOK_DURATION_MS": duration_ms,
     }
-    result = subprocess.run(
+    result = subprocess.run(  # pragma: no cover - trivial subprocess wrapper
         ["bash", HOOK], capture_output=True, text=True, env=env, timeout=60
     )
     return result, record.read_text(encoding="utf-8"), log
-
-
-def with_env_file(tmp_path, content):
-    (tmp_path / ".jcode").mkdir()
-    (tmp_path / ".jcode" / "jsay.env").write_text(content)
 
 
 class TestTurnJsay:

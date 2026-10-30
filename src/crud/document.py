@@ -1658,7 +1658,7 @@ async def query_documents_hybrid(
     """
     Hybrid search combining vector, FTS, and trigram search methods.
 
-    Combines semantic vector search with PostgreSQL full-text search (BM25-like)
+    Combines semantic vector search with PostgreSQL full-text search (tsvector/tsquery, GIN-indexed)
     and trigram fuzzy matching for improved retrieval of technical terms,
     proper nouns, and typo-tolerant matching.
 

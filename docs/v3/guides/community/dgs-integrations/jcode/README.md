@@ -68,6 +68,7 @@ settings in sync with the skill doc rather than duplicating stale defaults.
 | `tests/test_tailer_unit.py` | journal parsing, mapper, spool/retry, state persistence, main loop | offline |
 | `tests/test_secret_gate.py` | secret-gate hook allow/block cases (incl. all credential-assignment regexes) | offline |
 | `tests/test_capture_hook.py` | capture hook markers vs an in-process fake Honcho (session/turn lifecycle, fire-and-forget) | offline |
+| `tests/test_turn_jsay.py` | turn-speech hook vs a recording fake jsay (item-level gating, no workflow gates) | offline |
 | `tests/test_honcho_mcp.py` | MCP server end-to-end vs live Honcho, isolated workspace | live Honcho |
 | `tests/test_tailer.py` | tailer end-to-end + restart-no-duplicates | live Honcho |
 

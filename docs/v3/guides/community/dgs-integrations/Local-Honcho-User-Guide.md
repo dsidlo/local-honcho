@@ -4,6 +4,47 @@ A step-by-step guide for installing and using the Honcho Pi local memory server.
 
 ---
 
+> **Two deployment modes.** This guide covers both:
+> - **`honcho-pi` CLI installer** — a self-contained installer that manages its own
+>   config at `~/.config/honcho-pi/` (Docker or existing Postgres).
+> - **The actual running services** in this repo — systemd user services
+>   (`honcho-api`, `honcho-deriver`) running from `~/.local/lib/honcho/`, configured
+>   via `config.toml` + secrets-only `.env`. **When the sections below say
+>   `~/.config/honcho-pi/.env`, that applies only to the `honcho-pi` CLI path**;
+>   the running services use `~/.local/lib/honcho/config.toml` (see Configuration Reference).
+
+
+## Features
+
+The Local Honcho deployment adds the following features beyond upstream Honcho:
+
+### Memory pipeline
+- **Deriver** (background worker) processes incoming messages into observations/conclusions for each peer.
+- **Dreamer** consolidates memory in the background — deduction, induction, synthesis, and contradiction detection — producing `deductive`, `inductive`, `synthesis`, and `contradiction`-level conclusions with provenance (`source_ids`, `times_derived`).
+- **Dialectic (chat) API** (`/peers/{peer_id}/chat`) answers with context retrieved from memory; supports reasoning levels `minimal/low/medium/high/max`.
+
+### Conclusions (derived knowledge store)
+- Conclusions are Honcho's unit of memory: `explicit` (extracted from messages), `deductive`/`inductive`/`synthesis`/`contradiction` (derived while dreaming).
+- Full read/write/delete + semantic search + reasoning-tree traversal (MCP tools: `list_conclusions`, `query_conclusions`, `get_conclusions`, `get_derived_conclusions`, `create_conclusions`, `delete_conclusion`).
+
+### LLM rate-limit deferral (429 handling)
+- A provider HTTP 429 is treated as a **temporary throttle**, not a failure: the deriver defers the affected queue record (leaves it unprocessed/un-errored), records a `rate_limit_since` stamp, and moves on to other records — so the queue keeps draining while the provider recovers.
+- **Claim-gate**: a rate-limited work unit is not re-claimed until its cooldown elapses (prevents busy-looping against a throttled provider).
+- Config knobs: `LLM_RETRY_RATELIMIT_*` (enabled, quick retries, delay, cooldown, max deferrals, metric).
+
+### Queue scheduling
+- **Weighted Round-Robin (WRR)** scheduling (`[deriver.wrr]`) prevents starvation of low-volume task types (webhook, dream, reconciler); configurable weights/min/max slots and idle-fill strategy.
+
+### MCP server
+- A full Model Context Protocol server (`mcp/`, v3) exposes **40 tools** over workspace/peer/session/scope/conclusion/system categories (stdio, HTTP, and streamable-http/Cloudflare Workers). Remote: `https://mcp.honcho.dev`.
+
+### Config model
+- **`config.toml`** holds all non-secret configuration; **`.env`** holds secrets only. `api_key_env` references in TOML point at secret env vars.
+
+### Durable session notifications
+- Durable sessions produce **OS-level desktop notifications** (`notify-send`) on completion. Telegram/Discord/Luna external messaging are disabled by policy.
+
+
 ## Quick Start
 
 ### 1. Download & Install
@@ -213,76 +254,117 @@ honcho-pi self doctor --component pi
 
 ## Configuration Reference
 
-### Environment Variables
+The current deployment splits configuration into two files (the older single `.env`-everything approach was migrated):
 
-Edit `~/.config/honcho-pi/.env`:
+- **`config.toml`** (in `~/.local/lib/honcho/`) — all non-secret configuration: app, DB, embedding, deriver (incl. WRR), dialectic levels, summary, dream.
+- **`.env`** (in `~/.local/lib/honcho/`) — **secrets only** (API keys, DB connection URIs). Referenced from `config.toml` via `api_key_env`.
 
-**Core Settings**
-```bash
-HONCHO_PORT=8300                        # API port
-HONCHO_DB_CONNECTION_URI=postgresql+psycopg://honcho:honcho@localhost:5432/honcho
-NAMESPACE=honcho                        # Multi-tenant namespace
+> Precedence: `init > env > .env > config.toml > secrets > defaults`. A value set in `.env`/environment still overrides `config.toml`.
+
+**Core Settings (`config.toml`)**
+```toml
+[app]
+honcho_port = 8300                        # API port
+allowed_ip_networks = "127.0.0.0/8,172.20.0.0/24"
+
+[db]
+schema = "public"
+pool_size = 10
+max_overflow = 20
+pool_timeout = 30
+
+[embedding.model_config]
+model = "qwen3-embedding:8b"
+transport = "openai"
+[embedding.model_config.overrides]
+base_url = "http://localhost:11434/v1"
+api_key_env = "OLLAMA_API_KEY"    # secret lives in .env
 ```
 
-**LLM Providers**
+**Secrets (`.env`)**
 ```bash
-LLM_PROVIDER=vllm                       # Primary provider
-LLM_ANTHROPIC_API_KEY=sk-ant-xxxxx
-LLM_OPENAI_API_KEY=sk-xxxxxxxxxxxxx
-LLM_VLLM_BASE_URL=http://localhost:11434/v1
+OLLAMA_API_KEY=...
+LLM_VLLM_API_KEY=...
+INCEPTIONLABS_API_KEY=...
+HONCHO_DB_CONNECTION_URI=postgresql+psycopg://dsidlo@localhost:5433/honcho
+DB_CONNECTION_URI=postgresql+psycopg://dsidlo@localhost:5433/honcho
 ```
 
-**Deriver (Memory Processing)**
-```bash
-DERIVER_ENABLED=true                    # Background memory processing
-DERIVER_WORKERS=8                       # Number of worker processes
-DERIVER_PROVIDER=vllm                   # Provider for deriver
-DERIVER_MODEL=kimi-k2.5
-DERIVER_DEDUPLICATE=true                # Prevent duplicate observations
+**Deriver (Memory Processing) — `config.toml`**
+```toml
+[deriver]
+workers = 8
+flush_enabled = true
+
+[deriver.model_config]
+model = "mercury-3"
+transport = "openai"
+structured_output_mode = "json_object"
+thinking_budget_tokens = 2048
+max_output_tokens = 4096
+[deriver.model_config.overrides]
+base_url = "https://api.inceptionlabs.ai/v1"
+api_key_env = "INCEPTIONLABS_API_KEY"
+[deriver.model_config.fallback]
+model = "qwen3.5:latest"
+transport = "openai"
+[deriver.model_config.fallback.overrides]
+base_url = "http://localhost:11434/v1"
+api_key_env = "LLM_VLLM_API_KEY"
 ```
 
-**Dialectic (Chat/Query API)**
-```bash
-DIALECTIC_MAX_OUTPUT_TOKENS=8192
-DIALECTIC_HISTORY_TOKEN_LIMIT=4096
-
-# Reasoning levels
-DIALECTIC_LEVELS__MEDIUM__PROVIDER=vllm
-DIALECTIC_LEVELS__MEDIUM__MODEL=kimi-k2.5
-DIALECTIC_LEVELS__MEDIUM__THINKING_BUDGET_TOKENS=1024
+**Dialectic (Chat/Query API) — `config.toml`**
+```toml
+[dialectic.levels.medium.model_config]
+model = "glm-5.3-flash:cloud"
+transport = "openai"
+max_tool_iterations = 5
+thinking_budget_tokens = 1024
+[dialectic.levels.medium.model_config.overrides]
+base_url = "https://ollama.com/v1"
+api_key_env = "LLM_VLLM_API_KEY"
 ```
 
-**Dreamer (Memory Synthesis)**
-```bash
-DREAM_ENABLED=true                      # Background synthesis
-DREAM_PROVIDER=anthropic                # Provider for dreams
-DREAM_MODEL=claude-sonnet-4-20250514
-DREAM_DEDUCTION_MODEL=claude-haiku-4-5
-DREAM_INDUCTION_MODEL=claude-haiku-4-5
-DREAM_SYNTHESIS_MODEL=claude-haiku-4-5
+**Dreamer (Memory Synthesis) — `config.toml`**
+```toml
+[dream]
+document_threshold = 25
+idle_timeout_minutes = 30
+min_hours_between_dreams = 4
+
+[dream.deduction_model_config]
+model = "glm-5.3-flash:cloud"
+transport = "openai"
+[dream.deduction_model_config.overrides]
+base_url = "https://ollama.com/v1"
+api_key_env = "LLM_VLLM_API_KEY"
 ```
 
-**Pi Integration**
-```bash
-PI_EXTENSION_ENABLED=true               # Enable Pi hooks
-PI_OBS_ENABLED=true                     # Observe conversations
-PI_OBS_INCLUDE_THOUGHTS=true           # Include tool thoughts
-PI_OBS_INCLUDE_TOOLS=true              # Include tool calls
-PI_OBS_INCLUDE_RESULTS=true            # Include tool results
+**Pi Integration (extension config — `~/.pi/settings.json`)**
+```json
+{
+  "extension.honcho": {
+    "enabled": true,
+    "baseUrl": "http://localhost:8300",
+    "workspace": "default",
+    "agentId": "agent-pi-mono",
+    "observationMode": "session",
+    "includeThoughts": true,
+    "includeTools": true,
+    "includeResults": true,
+    "gitTracking": true
+  }
+}
 ```
 
 ### Configuration Files Location
 
 ```
-~/.config/honcho-pi/
-├── .env                    # Main configuration
-├── honcho.env              # Service environment (auto-generated)
-└── systemd/user/
-    ├── honcho-api.service
-    └── honcho-deriver.service
+~/.local/lib/honcho/
+├── config.toml              # all non-secret configuration
+├── .env                     # secrets only
+└── .env.honcho.bk           # backup of pre-migration .env
 ```
-
----
 
 ## Troubleshooting
 

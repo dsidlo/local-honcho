@@ -17,17 +17,22 @@
 ### Local-Honcho
 
 **Recent updates**
-- Added missing systhesis_specialist.py
-- Fixed bug with SythesisSpecialist not creating systhesis document records.
-- Hybrid Vector search, Full Text Search, Trigram Fuzzy Search with Corss-Encoder Reranking, as ollama embeddings may not generate vectors for non-gramatical content.
+- Added missing `synthesis_specialist.py`.
+- Fixed bug with `SynthesisSpecialist` not creating synthesis document records.
+- Hybrid Vector search, PostgreSQL Full Text Search (tsvector/tsquery, GIN-indexed), Trigram Fuzzy Search with Cross-Encoder Reranking, as ollama embeddings may not generate vectors for non-grammatical content.
 - pi-mono integrations:
-  - A pi-mono extension that captures the **complete ReAct cycle** for maximum Dreamer + Dialectic intelligence, with **intelligent content chunking** for large messages and documents. 
+  - A pi-mono extension that captures the **complete ReAct cycle** for maximum Dreamer + Dialectic intelligence, with **intelligent content chunking** for large messages and documents.
   - **Now enhanced with observational-memory hooks** for Pi session compaction/tree summarization, storing prioritized observations in Honcho for Dreaming.
   - **/honcho-apply-learnings** applies Synthesis Dreams to enhance appropriate agents.
-  - **New Features**: pi-mono Observational-memory duplication (compaction/tree hooks), Git branch integration, local fallback for API issues
-- Uses Python 3.13.12
-- Improved work queue handling to eliminate queue starvation for various work unit types. Change queue processing to WRR Wighted Round Robbing + guaranteed min/max queue priority for work unit types.
-- Switched ollama embedding to qwen3-embedding:8b, as 1024-dim embedding models were not able to produce embeddings for some content, cause queue work unit errors.
+  - **New Features**: pi-mono Observational-memory duplication (compaction/tree hooks), Git branch integration, local fallback for API issues.
+- Uses Python 3.13.12.
+- Improved work queue handling to eliminate queue starvation for various work unit types. Changed queue processing to WRR Weighted Round-Robin + guaranteed min/max queue priority for work unit types.
+- Switched ollama embedding to `qwen3-embedding:8b`, as 1024-dim embedding models were not able to produce embeddings for some content, causing queue work-unit errors.
+- **LLM rate-limit deferral (429)**: provider rate-limits are treated as temporary throttles — the deriver defers the affected queue record (unprocessed/un-errored), records a `rate_limit_since` stamp, and moves on, so the queue keeps draining while the provider recovers. A **claim-gate** prevents re-claiming a rate-limited unit until its cooldown elapses (no busy-loop). Configurable via `LLM_RETRY_RATELIMIT_*`.
+- **Conclusions**: derived-knowledge store with provenance levels (`explicit`/`deductive`/`inductive`/`synthesis`/`contradiction`), semantic search, and reasoning-tree traversal.
+- **MCP server**: full Model Context Protocol server (`mcp/`, v3) exposing 40 tools across workspace/peer/session/scope/conclusion/system categories (stdio, HTTP, streamable-http/Cloudflare Workers). Remote: `https://mcp.honcho.dev`.
+- **Config model**: configuration migrated to `config.toml` (non-secret) + `.env` (secrets only), with `api_key_env` references.
+- **Durable session notifications**: OS-level desktop notifications (`notify-send`) on completion; Telegram/Discord/Luna external messaging disabled by policy.
 
 ##### A fork of [plastic-labs/Honcho](https://github.com/plastic-labs/honcho)
 
