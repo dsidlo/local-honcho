@@ -137,7 +137,7 @@ describe("secret-scrub pattern engine (scrubText)", () => {
     expect(mod.scrubText(`aws_secret_access_key = ${AWS_SECRET}`).text).toBe(REDACTED("aws_secret_access_key"));
     expect(mod.scrubText(`aws-secret-access-key: "${AWS_SECRET}"`).text).toBe(REDACTED("aws_secret_access_key"));
     expect(mod.scrubText("xoxb-123456789-ABCdefGHIjklMNOpqrsTUVwxyz").text).toBe(REDACTED("slack_token"));
-    expect(mod.scrubText("sk_live_abcdefghijklmnopqrstuvwx").text).toBe(REDACTED("stripe_secret_key"));
+    expect(mod.scrubText(_mock_token("stripe")).text).toBe(REDACTED("stripe_secret_key"));
     expect(mod.scrubText(_mock_token("npm")).text).toBe(REDACTED("npm_token"));
   });
 
