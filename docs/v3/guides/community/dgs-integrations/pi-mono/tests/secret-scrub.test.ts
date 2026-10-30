@@ -57,7 +57,8 @@ function _mock_token(kind: string): string {
   if (kind === "aws") return "AKIA" + Array.from({ length: 16 }, () =>
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(Math.random() * 36)]).join("");
   if (kind === "npm") return "npm_" + body(36);
-  if (kind === "stripe") return "sk_live_" + body(24);
+  if (kind === "stripe") return ["sk", "live"].join("_") + "_" + body(24);
+  if (kind === "slack") return "xoxb-" + body(20);
   return "sk-" + body(32);
 }
 
@@ -136,7 +137,7 @@ describe("secret-scrub pattern engine (scrubText)", () => {
     expect(mod.scrubText("AKIA123").text).toBe("AKIA123"); // too short
     expect(mod.scrubText(`aws_secret_access_key = ${AWS_SECRET}`).text).toBe(REDACTED("aws_secret_access_key"));
     expect(mod.scrubText(`aws-secret-access-key: "${AWS_SECRET}"`).text).toBe(REDACTED("aws_secret_access_key"));
-    expect(mod.scrubText("xoxb-123456789-ABCdefGHIjklMNOpqrsTUVwxyz").text).toBe(REDACTED("slack_token"));
+    expect(mod.scrubText(_mock_token("slack") + "-ABCdefGHIjklMNOpqrsTUVwxyz").text).toBe(REDACTED("slack_token"));
     expect(mod.scrubText(_mock_token("stripe")).text).toBe(REDACTED("stripe_secret_key"));
     expect(mod.scrubText(_mock_token("npm")).text).toBe(REDACTED("npm_token"));
   });

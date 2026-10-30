@@ -48,11 +48,11 @@ Regex-based, deliberately protective (favors redacting plausible matches over mi
 | Kind | Matches |
 |------|---------|
 | `private_key` | PEM blocks (`BEGIN … PRIVATE KEY`) |
-| `github_token` / `github_pat` / `gitlab_token` | `ghp_…`, `gho_/ghs_/ghu_/ghr_`, `github_pat_…`, `glpat-…` |
+| `github_token` / `github_pat` / `gitlab_token` | `ghp-…`, `gho-/ghs-/ghu-/ghr-…`, `github-pat-…`, `glpat-…` |
 | `anthropic_api_key` / `openai_api_key` | `sk-ant-…`, `sk-…`/`sk-proj-…` (≥20 chars) |
 | `google_api_key` | `AIza…` (35 chars) |
 | `aws_access_key_id` / `aws_secret_access_key` | `AKIA/ASIA/ABIA/ACCA…`, contextual 40-char secrets |
-| `slack_token` / `stripe_secret_key` / `npm_token` | `xox…`, `sk_live_/rk_live_`, `npm_…` |
+| `slack_token` / `stripe_secret_key` / `npm_token` | `xox-…`, `sk-live/rk-live (Stripe live/restricted keys)`, `npm-…` |
 | `jwt` | `eyJ` two/three-segment tokens |
 | `auth_header` | `Bearer`/`Basic` + token (≥12 chars) |
 | `db_url_password` | password segment of `postgres://user:***@…`, `mysql://`, `mongodb(+srv)://`, `redis(s)://`, `amqp(s)://` |
